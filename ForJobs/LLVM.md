@@ -174,14 +174,81 @@ rematerialization
 target-specific constraints
 ```
 ## 5.解释 LLVM 如何做指令选择（Instruction Selection）。
+```
+LLVM 指令选择通过 SelectionDAG 或 GlobalISel，将 target-independent IR 转换为 target-specific MachineInstr，本质是基于 TableGen 描述的模式匹配过程，并结合合法化、优化和寄存器约束完成代码生成前的关键转换。
+```
+### TableGen → DAG Matcher 是怎么生成代码的？
+TableGen 会把指令匹配规则编译成一个基于字节码的 matcher 状态机，在运行时由 SelectionDAGISel 解释执行，实现高效的 DAG 模式匹配。
 
+### GlobalISel 如何支持自定义 ISA？
+GlobalISel 通过 Legalizer、RegBankSelect 和 InstructionSelect 的模块化设计，使得新增 ISA 只需实现这些组件并结合 TableGen 描述规则即可完成指令选择，扩展性优于 SelectionDAG。
 
-如何实现一个简单的优化 Pass？举例说明。
+### Triton / CUDA 编译器在 ISel 上的差异
+CUDA 编译器仍依赖 LLVM 的指令选择生成 PTX，而 Triton 将大部分优化和模式匹配前移到 MLIR 层，使 LLVM 的 ISel 更像一个后端代码生成器，弱化了传统指令选择的作用。
 
-LLVM 中循环优化（Loop Unroll、Loop Vectorize）是如何实现的？
+## 6.LLVM 中如何实现一个简单的优化 Pass？举例说明。
+本质上优化Pass就是将IR进行分析与变换，以达到优化目的。
+```
+选择 Pass 类型（Function / Loop / Module Pass）
+继承 PassInfoMixin
+实现 run() 方法
+遍历 IR（Instruction / BasicBlock / Function）
+修改 IR 并返回 PreservedAnalyses
+```
 
-LLVM 如何处理函数内联（Function Inlining）？优化前后有什么变化？
+## 7.LLVM 中循环优化（Loop Unroll、Loop Vectorize）是如何实现的？
+### LoopUnroll
+过程：
+   使用 LoopInfo 找到循环结构
+   用 ScalarEvolution (SCEV) 分析循环次数
+   判断是否可展开（trip count、代码膨胀）
+   复制 loop body 多次
+   调整 induction variable 和边界
+```
+1. 分析循环：
+    确定循环迭代次数
+    识别循环不变量
+2. 展开循环：
+    复制循环体代码指定次数
+    用迭代变量替换循环不变量
+3. 优化展开后的代码：
+    合并重复指令
+    移除死代码
+```
+### LoopVectorize
+过程：
+   依赖分析（MemoryDependence / Alias Analysis）
+   判断是否无 loop-carried dependency
+   构建 vector IR（使用 <4 x i32> 这种类型）
+   插入 SIMD 指令（如 AVX）
+关键点：
+   legality（是否合法）
+   profitability（是否值得）
 
-解释死代码消除（DCE）在 LLVM 中的实现原理。
+## 8.LLVM 如何处理函数内联（Function Inlining）？优化前后有什么变化？
+过程：
+   遍历 call graph
+   使用 InlineCost 评估是否 inline
+   将 callee IR 复制到 caller
+   替换参数 → 实参
+   删除 call 指令
+优化前后变化：
+   减少函数调用开销（包括栈帧分配、参数传递、返回值处理）
+   提高内联后的代码局部性（指令在 cache 中连续执行）
+   可能引入新的优化机会（如 DCE 或 GVN）
 
-LLVM 如何进行全局值编号（GVN）优化？
+## 9.解释死代码消除（DCE）在 LLVM 中的实现原理。
+核心思想：删除“对程序无影响”的代码
+实现：
+   没有 side effect（如 store / call）
+   结果未被使用（use_empty）
+
+## 10.LLVM 如何进行全局值编号（GVN）优化？
+过程：
+   给表达式分配 value number
+   相同表达式 → 相同编号
+   用已有结果替换重复计算
+关键点：
+   DominatorTree（保证可复用）
+   Expression hashing（表达式哈希）
+   Memory dependence（处理 load/store）
