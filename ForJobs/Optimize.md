@@ -36,9 +36,42 @@ perf report / flame graph
     ILP（指令级并行）
 如果 IR 看起来合理，我会进一步分析汇编是否存在 pipeline stall 或调度不佳。
 ## 2.举例说明一次中后端优化带来的性能提升。
-todo
+在分析 IR 时我发现，对于 struct/array 类型的字段访问，编译器在某些情况下不会自动做完全的冗余 load 消除，尤其是在：
+    ```
+    通过 getelementptr (GEP) 多次计算相同地址
+    或者经过轻微变形（不同 GEP 但语义相同）
+    ```
+    对于这种情况GVN很容易出现不命中的情况，导致同一个内存位置被多次 load
+实现：
+    我对同一个 basic block 内的 load 指令做扫描，通过对其地址表达式（GEP）进行规范化（canonicalization），识别出指向相同 base + offset 的内存访问，然后将后续的 load 替换为前面的结果。
+注意点：
+    中间必须没有store(值没有改变)
+为什么要做这个优化：
+    区别于LLVM的 GVN/EarlyCSE 的通用优化，我激进地优化了GEP被使用的场景：
+        - 激进的GEP等价识别
+        - offset的归一化
+    特别适用于：
+        - Array of Struct（结构体数组）
+        - 深层嵌套的GEP
+完整回复：
+    ```
+        我之前做过一个针对 LLVM IR 的中端优化，是一个基于 memory range 的冗余 load 消除。
 
+    一开始我是做 (base, offset) 级别的 load CSE，但后来发现对于 array/struct 类型，这种方式不够，因为很多访问其实是“子区间关系”，而不是完全相同的地址。
 
+    所以我把内存访问建模成 (base pointer, [start, end)) 的区间形式，并在 basic block 内维护一个已加载区间的集合。
+
+    当遇到新的 load 时，如果它的访问区间被已有区间完全覆盖，我就通过 extract 或类似方式从已有 value 中构造子值，从而避免新的内存访问。
+
+    在实现上，我做了保守的正确性控制，比如：
+
+    遇到 store 时，如果与已有区间重叠就会 invalidate
+    遇到 call / volatile / atomic 会作为 barrier
+    alias 分析只在 base pointer 完全一致时生效
+
+    这个优化在 struct/array 密集访问的场景下效果比较明显，相比普通的 load CSE 能进一步减少子字段访问带来的冗余 load，在一些 case 中 load 数量下降可以达到 30% 以上。
+    ```
+这段代码本质是一个“区间版的 MemCSE + store invalidation”，是 LLVM Memory 优化的一个简化模型。    
 ## 3.解释软硬件联合优化策略（如缓存对齐、流水线优化）的实现思路。
 ### 缓存对齐（Cache Alignment）
 问题：
