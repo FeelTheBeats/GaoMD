@@ -94,6 +94,18 @@ g++ -O2 -fdump-tree-all -fdump-rtl-all -fopt-info
 *   **阶段二：终极解法（镜像重装）**：由于环境污染已深入系统关键路径，最终通过**重装系统镜像**，利用镜像自带的干净 GCC 环境彻底根治。这不仅清空了错误的动态库配置，也恢复了最纯净的工具链符号链接。
 
 ---
+## 3.5 后发现的问题
+刚开始以为对 `GCC_EXEC_PREFIX` unset并重新设置，确实可以直接执行了，但是实际上我们应该可以直接通过path来控制运行哪个gcc
+再次排查，通过查看纯净环境中的配置:
+```
+env -i bash --noprofile --norc
+export PATH=/opt/gcc-13.2-debug/bin:/usr/bin
+export LD_LIBRARY_PATH=/opt/gcc-13.2-debug/lib64
+
+gcc ./1.cpp
+```
+发现环境没问题，因此是bashrc有问题，我操你妈，原来是对codex装载时echo进去的烂东西，直接规定了必须用gcc9，这太让我伤心了
+---
 
 ## 4. 警示：标准 GCC 编译配置（保命模版）
 
