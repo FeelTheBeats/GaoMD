@@ -1,0 +1,11 @@
+/* Enable widescreen mode */
+.wy-nav-content {
+    max-width: 90%; /* Set the maximum width to 90% or adjust as needed */
+    margin: 0 auto; /* Center the content */
+}
+
+/* Optional: Adjust the width of the navigation bar */
+.wy-side-nav-search {
+    max-width: 250px; /* Set the maximum width of the sidebar */
+}
+
