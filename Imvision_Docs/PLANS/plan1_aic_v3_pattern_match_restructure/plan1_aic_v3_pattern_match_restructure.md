@@ -100,10 +100,115 @@ ReduceMax → Sub → Exp → ReduceSum → Log → Sub
 #### 重构逻辑
 
 
-### SplitBaseNorm
+### SplitBaseNorm（先不重构）
+`引入PatternMatcher+ GraphRewriter，统一匹配/重写接口`
+#### pass功能
+将 LayerNorm/RMSNorm/InstanceNorm 等高层 Norm 算子分解为 VPU 直接支持的逐元素运算序列。
 
-### SplitExp/Splitinv/SplitMatmul/SplitSoftmax
+**硬件背景**：VPU 只支持 Eltwise（加减乘除）、Activation（LUT 查表激活）、Reduce（求均值/求和）。没有原生 Norm 指令，必须通过数学恒等式展开。
 
-### TilingBaseNorm/TilingSinCos
+**LayerNorm 分解**（`y = (x - mean) / sqrt(var + eps) * gamma + beta`）：
+```
+x → ReduceMean(HWC) → Sub(x, mean)         →  x - mean
+                    → Sub(x, x-mean)        →  (x-mean)²  (实际实现复用 Sub)
+                    → Mul(x-mean, x-mean)   →  (x-mean)²
+                    → ReduceSum(HWC)        →  var (近似)
+                    → Add(var, eps)         →  var+eps
+                    → InvSqrt(var+eps)      →  1/sqrt(var+eps)  (LUT 查表)
+                    → Mul(x-mean, inv)      →  归一化后
+                    → Mul(norm, gamma)      →  缩放
+                    → Add(scaled, beta)     →  最终输出
+```
 
-### ConvTranspose2d (x2)
+**RMSNorm**：省略减均值步骤，直接从平方和开始。
+
+**多分支**：不同 Norm 类型走不同分解路径；C 维超 4096 时走 channel-split（切 C → 分别 Norm → Concat）。
+
+#### 重构逻辑
+暂缓：匹配目标为 `BaseNorm` 基类（子类有 LayerNorm/RMSNorm 等），需在 Attr 中判断多种 Norm 类型，重构收益与风险不匹配。且 channel-split 路径有独立的拓扑序依赖。
+
+### SplitExp/SplitInv/SplitSoftmax（已重构）
+`手写遍历 → PatternBuilder，匹配与重写解耦`
+#### pass功能
+
+**SplitExp**：`y = exp(x)` → BatchNorm(shift) + Activation(exp_lut) + BatchNorm(scale)
+
+硬件背景：VPU 的 Activation 指令支持 LUT 查表实现 exp，但要求输入 ≤ 0（数值稳定）。所以先做 shift（`x' = x + shift, x' ≤ 0`），再查表 `exp(x')`，最后 scale（`y = exp(x') * exp(-shift)`），三个算子。VPU 一次 Act 指令完成。
+
+**SplitInv**：`y = 1/x` 或 `y = 1/sqrt(x)` → Activation(lut) + BatchNorm + Eltwise(mul/sub) 链
+
+硬件背景：VPU 的 Activation 支持 inv/inv_sqrt 模式（LUT 近似），但精度不够直接当输出。需要通过多项式逼近补偿：Activation（初始近似）→ BatchNorm（系数调整）→ Eltwise（Mul/Sub 逼近项）→ 最终 Mul/Sub 组合。Inv 和 InvSqrt 走不同链长（Inv: 5 个算子，InvSqrt: 7 个算子，因为 sqrt 逼近需要更高阶）。
+
+**SplitSoftmax**：`softmax(x) = exp(x-max) / sum(exp(x-max))` → 6 步基础算子
+
+硬件背景：无原生 Softmax 指令。分解为标准数值稳定公式：
+```
+ReduceMax(HWC) → Sub(x, max) → Activation(exp_lut) → ReduceSum(HWC) → 1/sum(LUT近似) → Mul(exp_out, recip)
+```
+其中 `1/sum` 用 Activation(inv_sqrt) + 多项式逼近（4 个 Eltwise）实现。
+
+当 C 维 > 4096（CHANNEL_MAX_DIM）时走 `SoftmaxSplitChannel` 路径：先沿 C 维 Slice → 每个 slice 各自 softmax → Concat 拼回。这规避了 Activation/Reduce 的通道数硬件限制。
+
+**三个 pass 的结构共性**：单算子匹配 → 创建 3~12 个替代算子链 → 删除原算子。替代算子全部是 VPU 原生指令（Activation/Eltwise/Reduce/BatchNorm/Slice/Concat）。
+
+#### 重构逻辑
+- 旧：`GraphViewer → for (idx : order) → dynamic_cast<T*>`，Impl 内部直接 `ReleaseNode + Resolve`（每匹配一个就 Resolve 一次）
+- 新：`PatternBuilder("ExpSplit").MatchNode("exp", NodeType<Exp>())` + `BatchRewriter` 延迟删除+单次 Resolve
+- SplitSoftmax：模式选择逻辑 `SatisfySplitC()` 保留在循环中，不变
+- SplitMatmul **暂不改**：`MergePermuteMatmul` 是子图匹配（Permute→Matmul/Matmul→Permute），且两轮 graph_viewer 有执行依赖
+
+### TilingBaseNorm/TilingSinCos（已重构）
+`PatternBuilder，tiling 逻辑从命令式改为声明式匹配`
+#### pass功能
+
+这两个 pass 位于"Split 之前"——**先切分再 lowering**。如果 tensor 太大导致中间结果超过 L1 buffer（1MB），Split 阶段产生的算子链将无法分配内存。所以 tiling pass 先把大 tensor 切片，让每个 slice 独立走后续的 Split→Kernel→Analyse 流程。
+
+**TilingBaseNorm**（LayerNorm W 维分块）：
+```
+触发条件：input size > 1MB && C ≤ 4096 && W > 32
+流程：LayerNorm → Slice(W 维) × N → 每个 W slice 独自 LayerNorm → Concat(W 维)
+```
+只切 W 维（不切 C/H），因为 C 维 > 4096 时 Norm 计算跨通道依赖过重，切 C 会破坏数学等价性。
+
+**TilingSinCos**（Sin/Cos H 维分块）：
+```
+触发条件：total_footprint = in × 2 + out + 876(LUT) > local_mem_limit
+流程：Sin/Cos → Slice(H 维) × N → 每个 H slice 独自 Sin/Cos → Concat(H 维)
+```
+Sin/Cos 的 Activation 需要 LUT 表（~876B），加上输入输出两份 buffer。`CalculateTilesForDim` 按 footprint / safe_limit 计算最少 tile 数，打 0.7 安全系数。
+
+**共同点**：条件性改写——不超限就不动，超限才切。这是**预防性 tiling**，不是算子分解。`need_tiling` 判断保留在循环中，和 PatternMatcher 的模式声明是正交的两个关注点。
+
+#### 重构逻辑
+- TilingSinCos 匹配两种类型：`MatchNode("op", lambda: Sin||Cos)`
+- 旧的 `nodes_to_remove` vec → BatchRewriter
+- 非 tiling 路径不调 RemoveNode（原样保留），BatchRewriter 空提交无副作用
+
+### ConvTranspose2d (x2)（已重构）
+`PatternBuilder，两个拆分 pass 统一用 pattern 匹配`
+#### pass功能
+
+两个 pass 都处理转置卷积（反卷积/Deconvolution）——因为 MPU 只支持前向 Conv2d，不支持 Deconv。
+
+**ConvTranspose2dSplit**（版本 1）：
+```
+Deconv(stride=1) → Pad + Conv2d(stride=1, kernel=orig)
+Deconv(stride=2) → Interp(2x upsample, zero-fill) + Pad + Conv2d(stride=1, kernel=orig)
+```
+- stride=2 时先 Interp 插零上采样 2x，再 Conv2d — MPU 的 Conv 只做 stride=1，上采样由 MTE 的 Interp 完成
+- Pad 处理 output_padding：ConvTranspose 的 output_pad 在正向 Conv 里无法表达，需要额外 Pad 补齐
+
+**ConvTranspose2d2Split**（版本 2，处理不同参数布局）：
+```
+stride=1 → ConvTranspose2d(stride=1)  (降级到版本 1)
+stride=2 → Pad + Conv2d(output_ch=4×orig, stride=1) + PixelShuffle(2x) + Slice(H/W)
+```
+- stride=2 时用 `Conv2d + PixelShuffle` 代替 Interp：Conv 输出 4 倍通道 → PixelShuffle 重排为 2x 空间上采样
+- 输出尺寸可能多了 1px，需要 Slice 裁掉
+- 支持 wino_mode（Winograd 加速卷积）
+
+**两个 pass 的关系**：版本 2 是版本 1 的增强版（支持 Winograd + PixelShuffle 路径），但参数布局不同，不能直接合并。编译时根据 JSON 中算子类型选择走哪个 pass。
+
+#### 重构逻辑
+- 旧：inline 改写逻辑嵌套在遍历循环内，ConvTranspose2d 直接 `ReleaseNode+Resolve` 每次
+- 新：循环体保留改写逻辑，`rewriter.RemoveNode` 替代 `ReleaseNode`，`rewriter.Commit()` 替代 `Resolve`
