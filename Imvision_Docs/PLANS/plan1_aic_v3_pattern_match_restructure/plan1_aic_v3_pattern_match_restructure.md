@@ -73,34 +73,23 @@ Reshape 在框架层面是"零成本"的（只改 shape 描述不搬数据），
 
 SliceFuse 重构已经提供了标准模式：PatternBuilder 声明匹配 → PatternMatcher 执行匹配 → BatchRewriter 批量清理。PermuteReplaceReshape 也应遵循这个模式。
 
-### LowerLogSoftmax(先不重构)
+### LowerLogSoftmax（已重构）
 #### pass功能
-LowerLogSoftmax 是一个 Module Pass，负责将高层的 LogSoftmax 算子分解（lowering）为硬件可直接执行的基上础算子序列。
+LowerLogSoftmax 是一个 Module Pass，负责将高层的 LogSoftmax 算子分解（lowering）为硬件可直接执行的基本算子序列。
 
-数学原理
+数学原理：`LogSoftmax(x_i) = (x_i - max(x)) - log( Σ_j exp(x_j - max(x)) )`
 
-利用数值稳定的恒等变换：
+分解步骤：ReduceMax → Sub → Exp → ReduceSum → Log → Sub
 
-LogSoftmax(x_i) = (x_i - max(x)) - log( Σ_j exp(x_j - max(x)) )
+特殊路径：当输入通道数超过 4096 时，走 channel-split 路径（Slice → 各 slice 独立 log-softmax → Concat）
 
-分解步骤
-
-ReduceMax → Sub → Exp → ReduceSum → Log → Sub
-
-1. ReduceMax — 求输入在 HWC 维度上的最大值
-2. Sub — 元素级减法：x - max(x)
-3. Exp — 对结果做指数运算（查表实现）
-4. ReduceSum — 沿通道维度求和
-5. Log — 对求和结果取自然对数（查表实现）
-6. Sub — 最终输出：(x - max) - log(sum)
-
-特殊路径
-
-当输入通道数超过 4096 时，会走 channel-split 路径：将输入沿通道维度切分成多个小块，分别做 log-softmax 分解后再拼接回来，以规避硬件通道维度的限制。
 #### 重构逻辑
+- 旧：`GraphViewer → for → dynamic_cast<LogSoftmax*>`，两个 Impl 各自 `ReleaseNode + Resolve`
+- 新：`PatternBuilder("LowerLogSoftmax").MatchNode("logsoftmax", NodeType<LogSoftmax>())` + `BatchRewriter`
+- `SatisfySplitC()` 分派保留在循环中（和 SplitSoftmax 完全相同的模式）
 
 
-### SplitBaseNorm（先不重构）
+### SplitBaseNorm（已重构）
 `引入PatternMatcher+ GraphRewriter，统一匹配/重写接口`
 #### pass功能
 将 LayerNorm/RMSNorm/InstanceNorm 等高层 Norm 算子分解为 VPU 直接支持的逐元素运算序列。
@@ -110,24 +99,25 @@ ReduceMax → Sub → Exp → ReduceSum → Log → Sub
 **LayerNorm 分解**（`y = (x - mean) / sqrt(var + eps) * gamma + beta`）：
 ```
 x → ReduceMean(HWC) → Sub(x, mean)         →  x - mean
-                    → Sub(x, x-mean)        →  (x-mean)²  (实际实现复用 Sub)
                     → Mul(x-mean, x-mean)   →  (x-mean)²
-                    → ReduceSum(HWC)        →  var (近似)
-                    → Add(var, eps)         →  var+eps
+                    → ReduceSum(HWC)        →  var
+                    → BatchNorm(var, eps)   →  var+eps (用 BatchNorm 的 scale+shift 实现 add eps)
                     → InvSqrt(var+eps)      →  1/sqrt(var+eps)  (LUT 查表)
                     → Mul(x-mean, inv)      →  归一化后
-                    → Mul(norm, gamma)      →  缩放
-                    → Add(scaled, beta)     →  最终输出
+                    → BatchNorm(gamma, beta)→  最终输出 (Mul+Add 合并为一个 BatchNorm)
 ```
 
-**RMSNorm**：省略减均值步骤，直接从平方和开始。
+**4 种 Norm 类型**：LayerNorm / InstanceNorm / RMSNorm / RMSNorm2，每种走独立的 Impl 函数。通过 `NormType → ImplFunc` 的 map 分派。
 
-**多分支**：不同 Norm 类型走不同分解路径；C 维超 4096 时走 channel-split（切 C → 分别 Norm → Concat）。
+**InstanceNorm** 额外处理 2D/1D 两种模式（H==1 时走 1D 路径），需要检查输入维度。
 
 #### 重构逻辑
-暂缓：匹配目标为 `BaseNorm` 基类（子类有 LayerNorm/RMSNorm 等），需在 Attr 中判断多种 Norm 类型，重构收益与风险不匹配。且 channel-split 路径有独立的拓扑序依赖。
+- 旧：`GraphViewer → for → dynamic_cast<BaseNorm*>`，4 个 Impl 函数各自 `ReleaseNode + Resolve`
+- 新：`PatternBuilder("NormSplit").MatchNode("basenorm", NodeType<BaseNorm>())` + `BatchRewriter`
+- map dispatch 保留在循环中（和 SplitSoftmax 的 `SatisfySplitC` 分派同理）
+- 4 个 Impl 函数去掉 ReleaseNode/Resolve（4 处替换），统一由 BatchRewriter.Commit() 处理
 
-### SplitExp/SplitInv/SplitSoftmax（已重构）
+### SplitExp/SplitInv/SplitSoftmax/SplitMatmul（已重构）
 `手写遍历 → PatternBuilder，匹配与重写解耦`
 #### pass功能
 
@@ -155,7 +145,7 @@ ReduceMax(HWC) → Sub(x, max) → Activation(exp_lut) → ReduceSum(HWC) → 1/
 - 旧：`GraphViewer → for (idx : order) → dynamic_cast<T*>`，Impl 内部直接 `ReleaseNode + Resolve`（每匹配一个就 Resolve 一次）
 - 新：`PatternBuilder("ExpSplit").MatchNode("exp", NodeType<Exp>())` + `BatchRewriter` 延迟删除+单次 Resolve
 - SplitSoftmax：模式选择逻辑 `SatisfySplitC()` 保留在循环中，不变
-- SplitMatmul **暂不改**：`MergePermuteMatmul` 是子图匹配（Permute→Matmul/Matmul→Permute），且两轮 graph_viewer 有执行依赖
+- SplitMatmul：两阶段——① `PerformMatmulConversion`（单节点 Matmul→Permute+Matmul 链）；② `MergePermuteMatmul`（**多节点子图匹配**：`Permute(WHC)→Matmul` 输入侧 + `Matmul→Permute(WHC)` 输出侧，用 `Chain` + `SingleUse` + `Attr` 声明式匹配）。这是 11 个 pass 中唯一真正用到 PatternMatcher 边匹配能力的 pass
 
 ### TilingBaseNorm/TilingSinCos（已重构）
 `PatternBuilder，tiling 逻辑从命令式改为声明式匹配`
