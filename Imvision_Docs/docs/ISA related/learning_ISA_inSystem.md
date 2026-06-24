@@ -140,17 +140,19 @@ SyncSet/SyncClr(用于放依赖的和被依赖的队列)
 - Multi Core/Cluster/Module 
 在软件层面，硬件的表现形式是 Group，和信道的信源异曲同工，有head和tail，前面几层是关键信息：sync\header等
 - ISA 字段
-SyncSet/SyncClr 依赖队列标记
-SyncID debug用
+SyncSet/SyncCl- 依赖队列标记
+SyncID-debug用
 CMD Num 命令标记，一个group的Header和tail段间的标记
 Hard Layer Num 用于约束，不同 Hard Layer之间的命令无sync指令，理解为分组用，体现在三个计算单元在不同的layer上
 Hard Layer CMD Num 同一级硬件上的命令如果function不同，则 CMD Num不同
+CheckSum group的组指令自检用
 
 ### MTE
+存储：0 Load Info
 计算、存储、控制流、同步
-### DMA
+### MPU
 计算、存储、控制流、同步
-### VMA
+### VPU
 计算、存储、控制流、同步
 ## ISA——>Compiler IR
 

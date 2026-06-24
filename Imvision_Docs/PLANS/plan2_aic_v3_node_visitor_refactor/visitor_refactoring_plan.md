@@ -50,34 +50,69 @@ AnalyseNode (L3, 继承 Node)
 
 ### 2.1 定义两个 Visitor 接口
 
+以下方法列表不覆盖全部子类，**仅覆盖 pass 中真正被 `dynamic_cast` 分发的类型**（基于全仓 grep 统计）。
+
+**NodeVisitor（L1 Operator + L2 Kernel）—— 16 个 Visit 方法：**
+
 ```cpp
-// ===== 图节点层 Visitor（L1 + L2） =====
 class NodeVisitor {
  public:
   virtual ~NodeVisitor() = default;
 
-  // L1 Operator 层 —— 42 个
-  virtual void Visit(Exp& op)            {}
-  virtual void Visit(Softmax& op)        {}
-  virtual void Visit(Conv2d& op)         {}
-  virtual void Visit(BatchNorm& op)      {}
-  virtual void Visit(Eltwise& op)        {}
-  // ... 按需添加，默认空实现
-};
+  // === L1: 被 pass 分发处理的 Operator 类型（13 个） ===
 
-// ===== 硬件层 Visitor（L3） =====
+  // Lowering / 拆分类
+  virtual void Visit(Exp& op)            {}
+  virtual void Visit(Inv& op)            {}
+  virtual void Visit(Sin& op)            {}
+  virtual void Visit(Cos& op)            {}
+  virtual void Visit(Softmax& op)        {}
+  virtual void Visit(LogSoftmax& op)     {}
+  virtual void Visit(BaseNorm& op)       {}  // LayerNorm/RMSNorm/InstanceNorm 基类
+  virtual void Visit(Matmul& op)         {}
+
+  // Tiling 类
+  virtual void Visit(LayerNorm& op)      {}  // TilingBaseNorm 单独匹配
+
+  // 特殊算子拆分类
+  virtual void Visit(ConvTranspose2d& op)  {}
+  virtual void Visit(ConvTranspose2d2& op) {}
+
+  // 优化类
+  virtual void Visit(Reshape& op)        {}
+  virtual void Visit(Permute& op)        {}  // ChannelLimitSplitPermute
+
+  // === L2: 被 pass 分发处理的 Kernel 类型（3 个） ===
+
+  virtual void Visit(Conv2dKernel& k)    {}
+  virtual void Visit(EltwiseKernel& k)   {}
+  virtual void Visit(Pool2dKernel& k)    {}
+};
+```
+
+**HwVisitor（L3 AnalyseGraph）—— 6 个 Visit 方法：**
+
+```cpp
 class HwVisitor {
  public:
   virtual ~HwVisitor() = default;
 
-  virtual void Visit(Conv2dLayer& l)     {}
-  virtual void Visit(Conv2dFusionLayer& l) {}
-  virtual void Visit(EltwiseLayer& l)    {}
-  virtual void Visit(Pool2d2Layer& l)    {}
-  virtual void Visit(SliceLayer& l)      {}
-  virtual void Visit(Mpu& l)             {}   // 中间基类，需要时 override
-  // ...
+  // L3 实际分发目标（基于 cascade_pass 等 pass 的 dynamic_cast 统计）
+  virtual void Visit(Conv2dLayer& l)         {}
+  virtual void Visit(Conv2dFusionLayer& l)   {}
+  virtual void Visit(EltwiseLayer& l)        {}
+  virtual void Visit(Pool2d2Layer& l)        {}
+  virtual void Visit(SliceLayer& l)          {}
+
+  // Mpu 是中间基类，Conv2dLayer/Conv2dFusionLayer 都继承它
+  // 如果 pass 只关心"是 MPU 操作"而不区分具体类型，可以只 override 这个
+  virtual void Visit(Mpu& l)                 {}
 };
+```
+
+**不加入 Visit 的类型**（虽然继承 Node，但没有 pass 对它们做类型分发）：
+
+- `BatchNorm`、`Eltwise`、`Reduce`、`Activation`、`Slice`、`Concat` 等——这些是 Lowering 后**创建出来的中间算子**，不是 pass 的匹配目标。如果有新 pass 需要对它们分发，后续追加 Visit 方法即可。
 ```
 
 ### 2.2 为什么不合并？
@@ -306,12 +341,89 @@ Phase 1: 基础设施
   2. HwVisitor 接口定义 + HwLayer::Accept + AnalyseNode wrapper
   3. 脚本批量生成 42 Operator + 17 Kernel 的 Accept override
 
-Phase 2: 试点验证
-  4. 选 SplitExp（简单单类型）迁移到 Visitor
-  5. 选 Cascade（L3 多类型分发）迁移到 Visitor
+Phase 2: 试点验证（选择标准见下）
+  4. SplitExp → L1 单类型，验证 Visitor 基础链路
+  5. Cascade → L3 多类型分发，验证 Wrapper 正确性
   6. 编译 + 跑现有测试确认无回归
 
 Phase 3: 渐进推广
   7. 新 pass 强制用 Visitor
   8. 旧 pass 按需迁移（每次改 pass 时顺手改）
 ```
+
+### 8.1 试点 pass 选择标准
+
+| 标准 | SplitExp | Cascade |
+|------|---------|---------|
+| 所属层 | L1 Operator | L3 AnalyseGraph |
+| 分发类型数 | 1 种（Exp） | 5+ 种（Conv2dLayer, EltwiseLayer, Pool2d2Layer...） |
+| 复杂度 | 最简单——验证 Accept→Visit 基础链路 | 复杂——验证 Wrapper 路由 + 多类型 dispatch |
+| 改动范围 | 1 个 Visit 重载 | 5+ 个 Visit 重载 |
+| 风险 | 低 | 中（涉及 HwLayer 中间基类 Mpu） |
+
+选择逻辑：**SplitExp 保证"能跑通"，Cascade 保证"能覆盖真实场景"**——一个验证 L1 的 NodeVisitor，一个验证 L3 的 HwVisitor + Wrapper。两者都通过后，其余 9 个 pass 的迁移就是复制粘贴。
+
+---
+
+## 九、向后兼容策略
+
+### 9.1 Accept 的默认实现 vs 纯虚函数
+
+`Node::Accept` **不使用纯虚函数，给默认实现**：
+
+```cpp
+// node.h
+class Node {
+ public:
+  virtual void Accept(NodeVisitor& v) { v.Visit(*this); }  // 默认实现，非纯虚
+};
+```
+
+**原因**：
+- 纯虚函数 → 42 个 Operator + 17 个 Kernel **必须全部** override，否则编译器拒绝编译
+- 默认实现 → 不 override 的子类也能编译，调用时走到 `v.Visit(Node&)`（基类默认 fallback）
+- Visitor 的 `Visit` 方法默认空实现 → 旧 pass 不做任何处理，逻辑等价于 `continue`
+
+### 9.2 渐进迁移路径
+
+```
+Day 1：NodeVisitor/HwVisitor 接口定义 + Node::Accept（默认实现）
+        ↓ 所有旧代码继续正常工作（不 override Accept 也能编译）
+Day 2：脚本批量加 42 Operator + 17 Kernel 的 Accept override
+        ↓ 每个类显式 override → double dispatch 可用了
+Day 3~5：试点 pass 迁移到 Visitor
+        ↓ 旧 pass 不受影响，和新 Visitor pass 并存
+后续：旧 pass 按需迁移
+        ↓ 最终目标：新 pass 统一用 Visitor，旧 pass 逐次清理
+```
+
+### 9.3 新旧代码并存的示例
+
+同一个代码仓中，以下两种写法**可以同时存在**：
+
+```cpp
+// 旧写法（不改的 pass）
+for (auto idx : order) {
+    auto* exp = dynamic_cast<Exp*>(net->GetOp(idx));
+    if (exp) { ExpSplitImpl(net, exp); }
+}
+
+// 新写法（已迁移的 pass）
+ExpSplitVisitor visitor(net);
+for (auto idx : order) {
+    net->GetOp(idx)->Accept(visitor);
+}
+```
+
+**互不冲突**——`dynamic_cast` 仍然可用（因为类型体系没变），`Accept/Visit` 只是新增了一条调用路径。
+
+### 9.4 需要子类 override Accept 的原因
+
+虽然默认实现可以让未 override 的子类编译通过，但**只在子类 override 后 double dispatch 才生效**。
+
+```
+未 override：exp.Accept(v) → Node::Accept(v) → v.Visit(Node&)   // 拿到 Node&，丢失具体类型
+已 override：exp.Accept(v) → Exp::Accept(v) → v.Visit(Exp&)      // 拿到 Exp&，double dispatch 生效
+```
+
+所以 Phase 1 的脚本批量 override 是**使 Visitor 可用**的前提——不 override 的类仍然可以走默认 fallback（不会崩溃），但无法被 Visitor 精确分发。
