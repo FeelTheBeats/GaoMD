@@ -1,0 +1,67 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8d792594..9db70f6e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -18,7 +18,7 @@ option(ENABLE_ASAN_ADDRESS "Enable AddressSanitizer (address detection)" ON)
+ option(ENABLE_ASAN_LEAK    "Enable LeakSanitizer (leak detection)"    ON)
+ 
+ add_compile_options(-std=c++17)
+-add_compile_options(-Wall -Werror -Wno-error=deprecated-declarations)
++add_compile_options(-Wall -Werror -Wno-error=deprecated-declarations -Wno-error=maybe-uninitialized)
+ # Clang warns about unused private fields; GCC does not have this warning.
+ # [[maybe_unused]] on non-static data members is unsupported in GCC 9.x,
+ # so we suppress the Clang-only warning at the flag level instead.
+diff --git a/build.sh b/build.sh
+index aed419b4..4c5ba0c8 100755
+--- a/build.sh
++++ b/build.sh
+@@ -171,8 +171,8 @@ cmake_args=(
+   -DBUILD_GTEST="${build_gtest}"
+   "${ccache_opts[@]}"
+   "${lld_opts[@]}"
+-  -DCMAKE_C_COMPILER=/usr/bin/gcc-9
+-  -DCMAKE_CXX_COMPILER=/usr/bin/g++-9
++  -DCMAKE_C_COMPILER=/usr/bin/gcc-15
++  -DCMAKE_CXX_COMPILER=/usr/bin/g++-15
+ )
+ 
+ # 8. Add ASAN flags for Debug/RelWithDebInfo
+diff --git a/include/aic/utils/utils.h b/include/aic/utils/utils.h
+index f5ef08ce..5671ddc3 100644
+--- a/include/aic/utils/utils.h
++++ b/include/aic/utils/utils.h
+@@ -95,7 +95,7 @@ inline std::vector<std::string> SplitString(const std::string &str, const std::s
+   strncpy(strs, str.c_str(), str.length() + 1);
+ 
+   char *d = new char[delim.length() + 1];
+-  strncpy(d, delim.c_str(), delim.length() + 1);
++  memcpy(d, delim.c_str(), delim.length() + 1);
+ 
+   char *p_save = NULL;
+   char *p = strtok_r(strs, d, &p_save);
+diff --git a/src/parser/layer/concat_parser.cpp b/src/parser/layer/concat_parser.cpp
+index b2766f1d..f3e25b88 100644
+--- a/src/parser/layer/concat_parser.cpp
++++ b/src/parser/layer/concat_parser.cpp
+@@ -37,7 +37,7 @@ OperatorRef ConcatParser::LoadParam(const nlohmann::ordered_json &sv_layer, Net
+   if (param.is_null()) {
+     AddMissingItemLog("param");
+   } else {
+-    uint32_t dim;
++    uint32_t dim = 0;
+     JsonParserLayerGetItem(param, "dim", dim);
+     auto mode_iter = dim_to_mode.find(dim);
+ 
+diff --git a/target/tensor_brain/transforms/cascade_pass.cpp b/target/tensor_brain/transforms/cascade_pass.cpp
+index b338ef14..6322efcf 100644
+--- a/target/tensor_brain/transforms/cascade_pass.cpp
++++ b/target/tensor_brain/transforms/cascade_pass.cpp
+@@ -901,7 +901,7 @@ common::Status CascadePass::IfmCascadeImplement(
+      */
+     NodeArg *out_arg = source->MutableOutputs()[0];
+     for (auto sink_node : can_cascade_sink_nodes) {
+-      uint32_t dst_idx;
++      uint32_t dst_idx = 0;
+       for (uint32_t idx = 0; idx < sink_node->MutableInputs().size(); ++idx) {
+         if (sink_node->MutableInputs().at(idx) == out_arg) {
+           dst_idx = idx;

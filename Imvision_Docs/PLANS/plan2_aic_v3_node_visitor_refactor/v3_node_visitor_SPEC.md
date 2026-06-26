@@ -6,28 +6,29 @@
 
 ## 目录
 
-- [问题场景](#问题场景)
-- [意义](#意义)
-- [整体设计](#整体设计)
-  - [设计思想（痛点 + 解决思路）](#设计思想)
-  - [支持场景](#支持场景)
-  - [整体流程](#整体流程)
-  - [子模块列表](#子模块列表)
-- [数据结构](#数据结构)
-  - [Node 基类](#node-基类新增)
-  - [NodeVisitor 接口](#nodevisitor-接口新建)
-  - [HwVisitor 接口](#hwvisitor-接口新建)
-  - [HwLayer 基类](#hwlayer-基类新增)
-  - [AnalyseNode Wrapper](#analysenode-wrapper新增)
-- [子模块设计](#子模块设计)
-- [向后兼容策略](#向后兼容策略)
-- [验证](#验证)
+- [1. 问题场景](#1-问题场景)
+- [2. 意义](#2-意义)
+- [3. 整体设计](#3-整体设计)
+  - [3.1. 设计思想（痛点 + 解决思路）](#31-设计思想)
+  - [3.2. 支持场景](#32-支持场景)
+  - [3.3. 整体流程](#33-整体流程)
+  - [3.4. 子模块列表](#34-子模块列表)
+- [4. 数据结构](#4-数据结构)
+  - [4.1. Node 基类](#41-node-基类新增)
+  - [4.2. NodeVisitor 接口](#42-nodevisitor-接口新建)
+  - [4.3. HwVisitor 接口](#43-hwvisitor-接口新建)
+  - [4.4. HwLayer 基类](#44-hwlayer-基类新增)
+  - [4.5. AnalyseNode Wrapper](#45-analysenode-wrapper新增)
+- [5. 子模块设计](#5-子模块设计)
+- [6. 新 Pass 开发方式](#6-新-pass-开发方式)
+- [7. 向后兼容策略](#7-向后兼容策略)
+- [8. 验证](#8-验证)
 
 ---
 
-## 问题场景
+## 1. 问题场景
 
-### 场景整理
+### 1.1. 场景整理
 
 AIC 编译器有三层 IR（Operator / Kernel / AnalyseGraph），每个 pass 都需要遍历图节点，对特定类型的节点做处理。当前类型分发模式：
 
@@ -58,9 +59,9 @@ for (auto& [order, node] : order_to_node) {
 
 ---
 
-## 整体设计
+## 3. 整体设计
 
-### 设计思想
+### 3.1. 设计思想
 
 #### 痛点问题
 
@@ -74,7 +75,7 @@ for (auto& [order, node] : order_to_node) {
 
 **与 PatternMatcher 的关系**：PatternMatcher 负责"在图里找到目标模式"（子图匹配），Visitor 负责"对找到的节点执行操作"（类型分发）。两者互补，不是替代。
 
-### 支持场景
+### 3.2. 支持场景
 
 | 场景 | 旧方案 | 新方案 |
 |------|--------|--------|
@@ -84,7 +85,7 @@ for (auto& [order, node] : order_to_node) {
 | 新类型默认行为 | 静默跳过（不报错） | `Visit(Node&)` fallback（可定制编译报错） |
 | 新增 Operator 子类 | 改 pass 的 if/else 链 | 补一行 `Accept` override + 各 Visitor 加 `Visit` 重载 |
 
-### 整体流程
+### 3.3. 整体流程
 
 **L1/L2（NodeVisitor）**：
 
@@ -105,7 +106,7 @@ node->Accept(hwVisitor)                  // node 是 AnalyseNode*
       → EltwiseLayer::Accept(v) override → v.Visit(EltwiseLayer&) ——→ Pass 处理
 ```
 
-### 子模块列表
+### 3.4. 子模块列表
 
 | 模块 | 文件 | 说明 |
 |------|------|------|
@@ -120,9 +121,9 @@ node->Accept(hwVisitor)                  // node 是 AnalyseNode*
 
 ---
 
-## 数据结构
+## 4. 数据结构
 
-### Node 基类（新增）
+### 4.1. Node 基类（新增）
 
 ```cpp
 // node.h
@@ -141,7 +142,7 @@ class Node {
 
 **编译依赖**：因 `Accept` 是 inline 方法且调用了 `v.Visit(*this)`，`node.h` 必须 include `node_visitor.h`，不能仅用前置声明。反向则只需前置声明（`node_visitor.h` 中 `Visit(Node&)` 只用引用，无需 `node.h` 完整定义），避免了循环依赖。
 
-### NodeVisitor 接口（新建）
+### 4.2. NodeVisitor 接口（新建）
 
 ```cpp
 // node_visitor.h
@@ -180,7 +181,7 @@ class NodeVisitor {
 
 **编译依赖**：所有方法默认实现为空 `{}`，无需包含具体类型的头文件，仅需前置声明。不能使用 `static_cast<Node&>(op)` 等需要完整类型定义的表达式——前置声明下 `static_cast` 无法验证继承链。
 
-### HwVisitor 接口（新建）
+### 4.3. HwVisitor 接口（新建）
 
 ```cpp
 // hw_visitor.h
@@ -210,7 +211,7 @@ class HwVisitor {
 
 **中间基类 Visit**：支持 pass 按粒度选择——如果 pass 只关心"这是 MPU 操作"而不区分 Conv2d vs ConvFusion，可只 override `Visit(Mpu&)`。
 
-### HwLayer 基类（新增）
+### 4.4. HwLayer 基类（新增）
 
 ```cpp
 // hw_layer.h
@@ -225,7 +226,7 @@ class HwLayer : public Node {
 
 **设计决策**：`Accept(HwVisitor&)` 是新的重载方法，不与 `Node::Accept(NodeVisitor&)` 冲突。C++ 根据 visitor 类型自动选择。
 
-### AnalyseNode Wrapper（新增）
+### 4.5. AnalyseNode Wrapper（新增）
 
 ```cpp
 // analyse_node.h
@@ -253,7 +254,7 @@ AnalyseNode::Accept(hwVisitor)
 
 ---
 
-## 子模块设计
+## 5. 子模块设计
 
 ### Operator 子类（45 个文件）
 
@@ -278,7 +279,78 @@ class Exp : public Operator {
 
 ---
 
-## 向后兼容策略
+## 6. 新 Pass 开发方式
+
+### 旧方式（deprecated，仅保留兼容）
+
+```cpp
+class NewPass : public ModulePass {
+  Status RunOnModule(Module& mod) override {
+    for (auto idx : order) {
+      auto* op = net->GetOp(idx);
+      if (auto* exp = dynamic_cast<Exp*>(op))       { /* 处理 Exp */ }
+      else if (auto* softmax = dynamic_cast<Softmax*>(op)) { /* 处理 Softmax */ }
+      else if (...) { }
+    }
+  }
+};
+```
+
+### 新方式（Visitor，推荐）
+
+**Step 1**：确认目标类型已在 `NodeVisitor`（或 `HwVisitor`）中声明。如果没有，加一行 `virtual void Visit(FooOp&) {}`。
+
+**Step 2**：创建 Visitor 子类，只 override 关心的类型：
+
+```cpp
+class NewPassVisitor : public NodeVisitor {
+  Net* net_;
+  BatchRewriter& rewriter_;
+ public:
+  explicit NewPassVisitor(Net* net, BatchRewriter& r)
+      : net_(net), rewriter_(r) {}
+
+  void Visit(Exp& e) override {
+    // 改写逻辑
+    rewriter_.RemoveNode(e.Index());
+  }
+
+  void Visit(Softmax& s) override {
+    // 改写逻辑
+    rewriter_.RemoveNode(s.Index());
+  }
+
+  // 其他 40 个类型 → 不 override → 自动 fallback 到 Visit(Node&) → 跳过
+};
+```
+
+**Step 3**：`RunOnModule` 中遍历图并调用 `Accept`：
+
+```cpp
+Status NewPass::RunOnModule(Module& mod) {
+  Net* net = dynamic_cast<Net*>(mod.GetGraphManager()->GraphPtr());
+  BatchRewriter rewriter(*net);
+  NewPassVisitor visitor(net, rewriter);
+
+  for (auto& node : net->Nodes()) {
+    node->Accept(visitor);  // 一行，自动路由到正确的 Visit 重载
+  }
+  return rewriter.Commit();
+}
+```
+
+### 与旧方式的区别
+
+| | 旧方式 | 新方式 |
+|------|--------|--------|
+| 类型分发 | 手写 `dynamic_cast` 链 | `Accept` 自动路由 |
+| 遗漏类型 | 静默跳过 | `Visit(Node&)` fallback（可定制编译报错） |
+| 新增 Operator 类型 | 改所有相关 pass 的 if/else | 加 1 行 Visit 声明 + 各 pass 加 1 个 Visit 重载 |
+| 样板代码 | `for + dynamic_cast + if/else` 每个 pass 重复 | `for + Accept` 一行 |
+
+---
+
+## 7. 向后兼容策略
 
 ### 渐进迁移
 
@@ -319,7 +391,7 @@ net->GetOp(idx)->Accept(visitor);
 
 ---
 
-## 验证
+## 8. 验证
 
 - 门禁测试（CI pipeline）
 - 编译验证（所有头文件可独立 include，无循环依赖）
@@ -328,12 +400,10 @@ net->GetOp(idx)->Accept(visitor);
 
 ---
 
-## 意义
+## 2. 意义
 
 - **类型分发与业务逻辑解耦**：`Node` 子类不再感知自身被哪些 pass 处理——每个子类只需实现一次 `Accept` 路由，所有 pass 通过 Visitor 接口以 `Visit(T&)` 重载的形式集中管理对同一类型的处理逻辑。类型分发从分散在 53 处 `dynamic_cast` 收敛到 `NodeVisitor::Visit` 的 16 个重载声明中。
 
 - **类型安全访问**：以 `node->Accept(visitor)` 的编译期重载决议替代运行时的 `dynamic_cast`。调用方不再需要手动恢复 `Node*` 的具体类型，路由由虚函数自动完成。
 
 - **操作可无限扩展**：类体系（42 个 Operator、17 个 Kernel、40 个 HwLayer）保持稳定，新增 pass 只需创建新的 Visitor 子类并 override 关心的 `Visit` 方法，无需修改任何 Node 子类的代码。
-
-> 会议答疑请参见附件：`v3_node_visitor_SPEC_FAQ.md`
