@@ -286,34 +286,28 @@ interp_in_tensor->data_type() != act_in_tensor->data_type();
 
 ### 5.2 具体建议
 
-#### 第一阶段（推荐立即做）：重构 4 个简单 2 节点模式
+#### 第一阶段（推荐立即做）：重构 7 个链式融合模式
 
-| 模式 | 适合度 | 优先级 |
-|------|--------|--------|
-| `ConvActFusionPattern` | ⭐⭐⭐⭐⭐ | P0 |
-| `ConvPoolFusionPattern` | ⭐⭐⭐⭐⭐ | P0 |
-| `BiInterpActFusionPattern` | ⭐⭐⭐⭐ | P1 |
-| `PoolActFusionPattern` | ⭐⭐⭐⭐ | P1 |
-| `ActPoolFusionPattern` | ⭐⭐⭐⭐ | P1 |
+`SliceFuse`（`docs/PATTERN_MATCHER.md`）已证明现有 API 支持 3 节点链（`DmaIn → Slice(H) → Slice(W)`），FusedOp 全部 7 个模式均可直接用 `Chain` + `Attr` 表达，无需 API 扩展。
 
-预期效果：减少 ~200 行重复代码，每个模式从 ~50 行缩减到 ~20 行（pattern 定义）+ ~15 行（rewrite 回调）。
+| 模式 | 类型 | 优先级 |
+|------|------|--------|
+| `ConvActFusionPattern` | 2-node | P0 |
+| `ConvPoolFusionPattern` | 2-node | P0 |
+| `BiInterpActFusionPattern` | 2-node | P1 |
+| `PoolActFusionPattern` | 2-node | P1 |
+| `ActPoolFusionPattern` | 2-node | P1 |
+| `ConvActPoolFusionPattern` | 3-node chain | P1 |
+| `ConvPoolActFusionPattern` | 3-node chain | P1 |
 
-#### 第二阶段：扩展 PatternMatcher API
+预期效果：减少 ~370 行重复代码，每个模式从 ~65 行缩减到 ~35 行（pattern 定义 ~12 行 + rewrite 回调 ~23 行）。
 
-在重构过程中，根据实际需求扩展：
-
-1. **`EdgeAttr`**：跨节点的边约束检查
-2. **`NodeTypeOr<T, U>`**：多类型节点匹配（种子可以是 Conv2dKernel 或 ConvFusionKernel）
-3. **`InputAttr` / `OutputAttr`**：节点 input/output tensor 的便捷属性访问
-
-#### 第三阶段（可选）：尝试链式融合
-
-在 PatternMatcher API 完善后，尝试重构 `ConvActPoolFusionPattern` 和 `ConvPoolActFusionPattern`。
+> **关于 Phase 2 扩展**：原设计提出的 `EdgeAttr`、`NodeTypeOr<T,U>`、`InputAttr`/`OutputAttr` 三项扩展经验证均为**非必要的语法糖**。`EdgeAttr` 可用 `Attr("from")` 内 `node.OutputNodesBegin()` 走到邻居替代；`NodeTypeOr` 可用 `Attr()` 内 `CastNoCheck<T> || CastNoCheck<U>` 替代；`InputAttr` 只是省一行 `Cast<Tensor>`。`SliceFuse` 的 3 节点链反例已证明现有 API 即可覆盖所有场景，无需等待任何 API 扩展。
 
 #### 不建议重构
 
-- `AsymmetricalPadFusionPattern`：高度定制化，用 PatternMatcher 反而增加复杂度
-- `ReluFusionPattern`：反向边匹配，与 PatternMatcher 设计方向不一致
+- `AsymmetricalPadFusionPattern`：高度定制化（`FusePadOp` 模板特化 + MPU pad 计算），用 PatternMatcher 反而增加复杂度
+- `ReluFusionPattern`：反向边匹配（ActivationKernel → upstream Kernel），`EnableRelu()` 就地修改，与 PatternMatcher 的顺向 Chain 设计方向不一致
 
 ### 5.3 重构示例
 
@@ -411,9 +405,8 @@ common::Status FusedOp::ConvActFusionPattern(KernelNet *kernel_net) {
 
 **Pattern-Match 方式重构 FusedOp 是可行的，推荐分阶段推进**：
 
-1. **可立即重构**（5/9 模式）：ConvAct、ConvPool、BiInterpAct、PoolAct、ActPool — 这些是经典 Producer-Consumer 模式，与 PatternMatcher 的设计目标完美匹配
-2. **需要 PatternMatcher 扩展后重构**（2/9 模式）：ConvActPool、ConvPoolAct — 需要多类型种子节点和内部状态检查
-3. **不建议重构**（2/9 模式）：AsymmetricalPad、ReluFusion — 高度定制化改写逻辑，声明式表达收益不足
+1. **可立即重构**（7/9 模式）：ConvAct、ConvPool、BiInterpAct、PoolAct、ActPool、ConvActPool、ConvPoolAct — 现有 API（`Chain` + `Attr`）已完整支持 2 节点和 3 节点链式模式（见 `SliceFuse` 示例），无需 API 扩展
+2. **不建议重构**（2/9 模式）：AsymmetricalPad、ReluFusion — 高度定制化改写逻辑，声明式表达收益不足
 
 重构的核心价值不在于消除代码行数，而在于**分离关注点**：匹配逻辑用声明式 DSL 表达（可读、可测、可复用），改写逻辑保留命令式的灵活性。这与 LLVM 的 PatFrag / MLIR 的 DRR 设计理念一致。
 
@@ -423,6 +416,71 @@ common::Status FusedOp::ConvActFusionPattern(KernelNet *kernel_net) {
 
 核心发现：
 
-1. PatternMatcher API 还缺两个关键能力：跨节点 EdgeAttr（如 MatchAcc、CheckConvDtype）和多类型种子节点匹配（NodeTypeOr<T,U>），这两项是第一阶段的必要扩展
+1. 现有 PatternMatcher API 已足够覆盖 FusedOp 全部 7 个链式融合模式。Phase 2 的三项扩展（`EdgeAttr`、`NodeTypeOr`、`InputAttr`/`OutputAttr`）均可用 `Attr()` lambda 绕过，本质是语法糖而非功能缺口——`SliceFuse`（3 节点链 `DmaIn → Slice(H) → Slice(W)`）已证明这一点
 2. BatchRewriter 的 batch 语义与 FusedOp 的 work-while-you-go 模式冲突——需要每次只取一个 MatchResult、改写后立即重匹配，但开销可控
 3. 匹配和改写分离是最大的架构收益：当前每个模式的 ~15 行散落约束检查（nullptr、output edge count、dtype、bin_mode）将收敛到 ~10 行声明式 DSL
+
+---
+
+## 八、重构实施记录（2026-06-29）
+
+### 8.1 实施内容
+
+| 项目 | 数量 |
+|------|------|
+| 重构模式 | 7/9 |
+| 未重构模式 | 2/9（AsymmetricalPad、ReluFusion） |
+| 新增 include | 2 个（`pattern_matcher.h`、`graph_rewriter.h`） |
+| 编译状态 | ✅ fused_op.cpp 编译通过 |
+
+### 8.2 代码量变化
+
+| 指标 | 重构前 | 重构后 | 变化 |
+|------|--------|--------|------|
+| 总行数 | 904 | 531 | -373 行（-41%） |
+| 7 个模式平均行数 | ~65 | ~35 | -46% |
+| 样板代码（GraphViewer + for-loop + CastNoCheck） | 每模式 ~10 行 × 7 | 消除 | -70 行 |
+
+### 8.3 未重构模式的原因
+
+| 模式 | 原因 | 可能的简单重构 |
+|------|------|--------------|
+| `ReluFusionPattern` | ① 向上游匹配（反向边），PatternMatcher 设计为顺向 Chain；② 改写是 `EnableRelu()` 的就地修改，非创建融合 Kernel；③ LUT 比较（`MatchRelu` 模板）已很好封装 | 如果 PatternMatcher 未来支持 `ReverseChain()`，可用 ~10 行 pattern + ~15 行 rewrite 替代当前 ~45 行 |
+| `AsymmetricalPadFusionPattern` | ① 改写是 pad 属性的就地修改（`FusePadOp` 模板特化）；② 包含 MPU pad 计算公式和 Pool2d pad 合法性验证，逻辑高度定制化；③ 使用 try-both-types（`dynamic_cast<Conv2dKernel>` 或 `Pool2dKernel`） | 可将 Pad → downstream 的拓扑匹配用 PatternMatcher 替代（~8 行），但 rewrite 逻辑保留命令式。优先级低——模式体已较紧凑（~40 行） |
+
+### 8.4 重构模式统一结构
+
+```cpp
+common::Status XxxFusionPattern(KernelNet *net) {
+  auto pattern = PatternBuilder("name")
+      .MatchNode("seed", NodeType<SeedKernel>())
+      .MatchNode("sink", NodeType<SinkKernel>())
+      .Chain("seed", "sink")
+      .SingleUse("seed")
+      .Attr(...)         // 约束在 pattern 定义阶段声明
+      .Build();
+
+  for (;;) {             // match-one-rewrite-one loop
+    auto matches = PatternMatcher(*net).Match(pattern);
+    if (matches.empty()) break;
+    auto& m = matches[0];
+
+    // cast + cross-node check + RewriteRefModelJson + fusion kernel create
+    // ...
+
+    BatchRewriter rewriter(*net);
+    rewriter.RemoveNode(sink->Index());
+    rewriter.RemoveNode(seed->Index());
+    AIC_RETURN_IF_ERROR(rewriter.Commit());
+  }
+  return Status::OK();
+}
+```
+
+### 8.5 核心收益
+
+1. **关注点分离**：匹配逻辑（"找什么"）收敛到 `PatternBuilder` 声明式 DSL，可读、可测、可复用；改写逻辑（"怎么做"）保留命令式灵活性
+2. **消除样板**：`GraphViewer` + `for` + `CastNoCheck` + `nullptr check` + `GetOutputEdgesCount` 在每个模式中重复的 ~10 行代码完全消除
+3. **约束前置**：`bin_mode != 1`、`CheckConvDtype`、`HavePool()/HaveAct()` 等约束在 Pattern 定义阶段声明，匹配引擎统一校验，不再散落在 `if-continue` 链中
+4. **批量改写**：`BatchRewriter::Commit()` 合并多次 `ReleaseNode` + 单次 `Resolve()`，避免每删除一个节点就重建图拓扑
+5. **扩展性提升**：新增融合模式只需定义 Pattern + 写 rewrite 回调（~40 行），不用复制完整的拓扑遍历样板
