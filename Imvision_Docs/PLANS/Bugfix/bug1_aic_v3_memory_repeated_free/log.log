@@ -1,0 +1,228 @@
+[32m[Info] [0mHello TensorBrain!
+[32m[Info] [0mcompiling /home/sevengao/bugs/001_memory_repeated_free/iq_model49/iq_model49_sv.json
+
+CSV saved to: ./sync_info/52_InsertSync_sync_summary.csv
+
+CSV saved to: ./sync_info/52_InsertSync_sync_detail.csv
+
+CSV saved to: ./sync_info/53_Cascade_sync_summary.csv
+
+CSV saved to: ./sync_info/53_Cascade_sync_detail.csv
+
+CSV saved to: ./sync_info/54_InvalidCascadeEliminate_sync_summary.csv
+
+CSV saved to: ./sync_info/54_InvalidCascadeEliminate_sync_detail.csv
+
+CSV saved to: ./sync_info/55_MemAlloc_sync_summary.csv
+
+CSV saved to: ./sync_info/55_MemAlloc_sync_detail.csv
+
+CSV saved to: ./sync_info/56_HwLayerInplace_sync_summary.csv
+
+CSV saved to: ./sync_info/56_HwLayerInplace_sync_detail.csv
+
+CSV saved to: ./sync_info/57_LiveTimeAnalyse_sync_summary.csv
+
+CSV saved to: ./sync_info/57_LiveTimeAnalyse_sync_detail.csv
+
+CSV saved to: ./sync_info/58_DumpAnalysisGraphPass_sync_summary.csv
+
+CSV saved to: ./sync_info/58_DumpAnalysisGraphPass_sync_detail.csv
+
++----------+--------+------------+------+-------------+-------------+
+|Start Addr|End Addr|Size (bytes)|Status|Producer Type|Producer Name|
++----------+--------+------------+------+-------------+-------------+
+|0         |4194304 |4194304     |FREE  |-            |-            |
++----------+--------+------------+------+-------------+-------------+
+Total segments: 1
+Total blocks: 131072
+Total FREE: 4194304 bytes
+Total ALLOCATED: 0 bytes
+Total memory: 4194304 bytes
+
+CSV saved to: ./mem_csv/mem_0_DummySlice.layer.DmaIn.layer.copy_in_2FConcat_output_0.slice.input.0.csv
+
++----------+--------+------------+---------+--------------+---------------------------------------------------+
+|Start Addr|End Addr|Size (bytes)|Status   |Producer Type |Producer Name                                      |
++----------+--------+------------+---------+--------------+---------------------------------------------------+
+|0         |552960  |552960      |ALLOCATED|npu_dma_in_ch0|DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0|
+|552960    |4194304 |3641344     |FREE     |-             |-                                                  |
++----------+--------+------------+---------+--------------+---------------------------------------------------+
+Total segments: 2
+Total blocks: 131072
+Total FREE: 3641344 bytes
+Total ALLOCATED: 552960 bytes
+Total memory: 4194304 bytes
+
+CSV saved to: ./mem_csv/mem_1_DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0.csv
+
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|Start Addr|End Addr|Size (bytes)|Status   |Producer Type|Producer Name                                                         |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|0         |552960  |552960      |FREE     |-            |-                                                                     |
+|552960    |1105920 |552960      |ALLOCATED|mte          |DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0_datalayout_convert|
+|1105920   |4194304 |3088384     |FREE     |-            |-                                                                     |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+Total segments: 3
+Total blocks: 131072
+Total FREE: 3641344 bytes
+Total ALLOCATED: 552960 bytes
+Total memory: 4194304 bytes
+
+CSV saved to: ./mem_csv/mem_2_DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0_datalayout_convert.csv
+
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|Start Addr|End Addr|Size (bytes)|Status   |Producer Type|Producer Name                                                         |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|0         |552960  |552960      |FREE     |-            |-                                                                     |
+|552960    |1105920 |552960      |ALLOCATED|mte          |DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0_datalayout_convert|
+|1105920   |4194304 |3088384     |FREE     |-            |-                                                                     |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+Total segments: 3
+Total blocks: 131072
+Total FREE: 3641344 bytes
+Total ALLOCATED: 552960 bytes
+Total memory: 4194304 bytes
+
+CSV saved to: ./mem_csv/mem_3_Pad.layer._Pad_1.h.0.csv
+
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|Start Addr|End Addr|Size (bytes)|Status   |Producer Type|Producer Name                                                         |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|0         |552960  |552960      |FREE     |-            |-                                                                     |
+|552960    |1105920 |552960      |ALLOCATED|mte          |DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0_datalayout_convert|
+|1105920   |4194304 |3088384     |FREE     |-            |-                                                                     |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+Total segments: 3
+Total blocks: 131072
+Total FREE: 3641344 bytes
+Total ALLOCATED: 552960 bytes
+Total memory: 4194304 bytes
+
+CSV saved to: ./mem_csv/mem_4_DummySlice.layer.DmaIn.layer.copy_in_2FConcat_output_0.slice.input.1.csv
+
++----------+--------+------------+---------+--------------+----------------------------------------------------------------------+
+|Start Addr|End Addr|Size (bytes)|Status   |Producer Type |Producer Name                                                         |
++----------+--------+------------+---------+--------------+----------------------------------------------------------------------+
+|0         |552960  |552960      |FREE     |-             |-                                                                     |
+|552960    |1105920 |552960      |ALLOCATED|mte           |DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0_datalayout_convert|
+|1105920   |1658880 |552960      |ALLOCATED|npu_dma_in_ch0|DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.1                   |
+|1658880   |4194304 |2535424     |FREE     |-             |-                                                                     |
++----------+--------+------------+---------+--------------+----------------------------------------------------------------------+
+Total segments: 4
+Total blocks: 131072
+Total FREE: 3088384 bytes
+Total ALLOCATED: 1105920 bytes
+Total memory: 4194304 bytes
+
+CSV saved to: ./mem_csv/mem_5_DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.1.csv
+
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|Start Addr|End Addr|Size (bytes)|Status   |Producer Type|Producer Name                                                         |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|0         |552960  |552960      |FREE     |-            |-                                                                     |
+|552960    |1105920 |552960      |ALLOCATED|mte          |DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0_datalayout_convert|
+|1105920   |1658880 |552960      |FREE     |-            |-                                                                     |
+|1658880   |2211840 |552960      |ALLOCATED|mte          |DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.1_datalayout_convert|
+|2211840   |4194304 |1982464     |FREE     |-            |-                                                                     |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+Total segments: 5
+Total blocks: 131072
+Total FREE: 3088384 bytes
+Total ALLOCATED: 1105920 bytes
+Total memory: 4194304 bytes
+
+CSV saved to: ./mem_csv/mem_6_DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.1_datalayout_convert.csv
+
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|Start Addr|End Addr|Size (bytes)|Status   |Producer Type|Producer Name                                                         |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+|0         |552960  |552960      |FREE     |-            |-                                                                     |
+|552960    |1105920 |552960      |ALLOCATED|mte          |DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.0_datalayout_convert|
+|1105920   |1658880 |552960      |FREE     |-            |-                                                                     |
+|1658880   |2211840 |552960      |ALLOCATED|mte          |DmaIn.layer.DmaIn.layer.copy_in_2FConcat_output_0.1_datalayout_convert|
+|2211840   |4194304 |1982464     |FREE     |-            |-                                                                     |
++----------+--------+------------+---------+-------------+----------------------------------------------------------------------+
+Total segments: 5
+Total blocks: 131072
+Total FREE: 3088384 bytes
+Total ALLOCATED: 1105920 bytes
+Total memory: 4194304 bytes
+
+CSV saved to: ./mem_csv/mem_7_Pad.layer._Pad_1.h.1.csv
+[31m[Erro] [0m no enough memory space for malloc. 
+[31m[Erro] [0mMalloc Error for node:[DummyConcat.layer./Pad_1.13] tensor:[2FPad_1_output_0], size: 8355840
+[31m[Erro] [0mAicError: FAIL: 
+[31m[Erro] [0mAicError: FAIL: 
+[31m[Erro] [0mAicError: FAIL: 
+[31m[Erro] [0mAicError: FAIL: 
+
+CSV saved to: ./sync_info/59_HwLayerMemAlloc_sync_summary.csv
+
+CSV saved to: ./sync_info/59_HwLayerMemAlloc_sync_detail.csv
+
++--+-------------------------+--------+------+
+|# |Pass Name                |Time(ms)|Status|
++--+-------------------------+--------+------+
+|1 |ReadCfgFileInfos         |0       |OK    |
+|2 |CompressTensorShapeHandle|0       |OK    |
+|3 |InsertCopy               |0       |OK    |
+|4 |Yuv2rgbSplit             |0       |OK    |
+|5 |NormTiling               |0       |OK    |
+|6 |NormSplit                |0       |OK    |
+|7 |MatmulSplit              |0       |OK    |
+|8 |ChannelLimitSplitPermute |0       |OK    |
+|9 |ConvTranspose2d2Split    |0       |OK    |
+|10|ConvTranspose2dSplit     |0       |OK    |
+|11|SoftmaxSplit             |0       |OK    |
+|12|SinCosTiling             |0       |OK    |
+|13|SinCosSplit              |0       |OK    |
+|14|ExpSplit                 |0       |OK    |
+|15|InvSplit                 |0       |OK    |
+|16|LowerLogSoftmax          |0       |OK    |
+|17|PermuteReplaceReshape    |0       |OK    |
+|18|DumpOperatorGraphPass    |0       |OK    |
+|19|Lowering                 |0       |OK    |
+|20|DumpKernelGraphPass      |0       |OK    |
+|21|GenIOInfo                |0       |OK    |
+|22|FusedOp                  |0       |OK    |
+|23|CompressWeight           |0       |OK    |
+|24|SplitOp                  |0       |OK    |
+|25|KernelConcatEliminate    |0       |OK    |
+|26|DeleteConcatBeforeConv   |0       |OK    |
+|27|ParamsReplace            |0       |OK    |
+|28|BroadcastImplement       |0       |OK    |
+|29|TwoVpuPipeline           |0       |OK    |
+|30|SplitCascadeOp           |0       |OK    |
+|31|ConcatTreeFuse           |0       |OK    |
+|32|BuildHwGraph             |35      |OK    |
+|33|SliceFuse                |0       |OK    |
+|34|SliceTilingMove          |0       |OK    |
+|35|DumpKernelGraphPass      |0       |OK    |
+|36|MidResultsTransfer       |0       |OK    |
+|37|PackParamDatas           |0       |OK    |
+|38|HwlayerConcatEliminate   |0       |OK    |
+|39|HwLayerSliceToDummy      |0       |OK    |
+|40|InsertParamDataFetch     |0       |OK    |
+|41|InitialLoadParams        |0       |OK    |
+|42|SplitLargeTensor         |0       |OK    |
+|43|MultloadTilingMove       |0       |OK    |
+|44|HwLayerConcatToDummy     |0       |OK    |
+|45|BuildAnalyseGraph        |19      |OK    |
+|46|InsertDataLayout         |15      |OK    |
+|47|DumpAnalysisGraphPass    |0       |OK    |
+|48|VbusIOMemManager         |0       |OK    |
+|49|MultiMpuParallelism      |0       |OK    |
+|50|SetVpuHwTypePass         |0       |OK    |
+|51|HandCfgHwTypePass        |0       |OK    |
+|52|InsertSync               |0       |OK    |
+|53|Cascade                  |0       |OK    |
+|54|InvalidCascadeEliminate  |0       |OK    |
+|55|MemAlloc                 |0       |OK    |
+|56|HwLayerInplace           |0       |OK    |
+|57|LiveTimeAnalyse          |2       |OK    |
+|58|DumpAnalysisGraphPass    |0       |OK    |
+|59|HwLayerMemAlloc          |611     |FAIL  |
++--+-------------------------+--------+------+
+[31m[Erro] [0mrun passes error, pls check!
+[31m[Erro] [0mcompile /home/sevengao/bugs/001_memory_repeated_free/iq_model49/iq_model49_sv.json failed
