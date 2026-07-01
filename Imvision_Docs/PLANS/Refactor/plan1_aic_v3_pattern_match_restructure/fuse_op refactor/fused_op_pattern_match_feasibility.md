@@ -164,13 +164,12 @@ ConvFusionKernel → ActivationKernel  // 三层融合（Conv→Pool→Act）
 
 #### ReluFusionPattern
 
-**可表达度：20%**
+**可表达度：80%**（修正：PatternMatcher 的 `TryExpand` 双向扩展机制支持从下游向上游搜索，`Chain("kernel", "act")` 即可表达此模式，不存在"不支持逆向匹配"的问题）
 
 原因：
-- 种子是 ActivationKernel(ReLU)，**向上游**匹配（找 input node）
 - 改写是调用 `kernel->EnableRelu()` 的**就地修改**，不创建新 Kernel
 - 匹配逻辑（`MatchRelu` 模板、LUT 比较）已很好地封装
-- 本质上是一个"反向边遍历"模式，PatternMatcher 设计为"顺向匹配"
+- 模式体仅 ~45 行，重构净收益有限
 
 #### ConvPoolActFusionPattern / ConvActPoolFusionPattern 的部分逻辑
 
@@ -307,7 +306,7 @@ interp_in_tensor->data_type() != act_in_tensor->data_type();
 #### 不建议重构
 
 - `AsymmetricalPadFusionPattern`：高度定制化（`FusePadOp` 模板特化 + MPU pad 计算），用 PatternMatcher 反而增加复杂度
-- `ReluFusionPattern`：反向边匹配（ActivationKernel → upstream Kernel），`EnableRelu()` 就地修改，与 PatternMatcher 的顺向 Chain 设计方向不一致
+- `ReluFusionPattern`：`EnableRelu()` 就地修改（非创建融合 kernel）+ LUT 匹配已很好封装，重构净收益有限
 
 ### 5.3 重构示例
 
@@ -445,7 +444,7 @@ common::Status FusedOp::ConvActFusionPattern(KernelNet *kernel_net) {
 
 | 模式 | 原因 | 可能的简单重构 |
 |------|------|--------------|
-| `ReluFusionPattern` | ① 向上游匹配（反向边），PatternMatcher 设计为顺向 Chain；② 改写是 `EnableRelu()` 的就地修改，非创建融合 Kernel；③ LUT 比较（`MatchRelu` 模板）已很好封装 | 如果 PatternMatcher 未来支持 `ReverseChain()`，可用 ~10 行 pattern + ~15 行 rewrite 替代当前 ~45 行 |
+| `ReluFusionPattern` | ① 改写是 `EnableRelu()` 的就地修改，非创建融合 Kernel，与 BatchRewriter 的 Remove-then-Commit 模式不匹配；② LUT 比较（`MatchRelu` 模板）已很好封装；③ 模式体仅 ~45 行 | 可用 PatternMatcher 替代拓扑匹配部分（~8 行），但 rewrite 逻辑保留命令式——`Chain("kernel", "act")` 的双向展开已支持此模式，不需要等待新 API |
 | `AsymmetricalPadFusionPattern` | ① 改写是 pad 属性的就地修改（`FusePadOp` 模板特化）；② 包含 MPU pad 计算公式和 Pool2d pad 合法性验证，逻辑高度定制化；③ 使用 try-both-types（`dynamic_cast<Conv2dKernel>` 或 `Pool2dKernel`） | 可将 Pad → downstream 的拓扑匹配用 PatternMatcher 替代（~8 行），但 rewrite 逻辑保留命令式。优先级低——模式体已较紧凑（~40 行） |
 
 ### 8.4 重构模式统一结构
