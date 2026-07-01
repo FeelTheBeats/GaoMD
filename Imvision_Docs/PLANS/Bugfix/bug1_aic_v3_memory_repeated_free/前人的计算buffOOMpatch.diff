@@ -1,0 +1,749 @@
+From 55f6e40030682fdefd59c87b509775b7d5367a9b Mon Sep 17 00:00:00 2001
+From: eloisezhang <eloisezhang@ai-imvision.cn>
+Date: Mon, 22 Jun 2026 10:49:06 +0800
+Subject: [PATCH] FIX: AIC_V3: fix pad C/H tiling selection
+
+WHY:
+1. Pad large-shape cases may exceed local memory without tiling.
+2. Pad channel tiling alone cannot cover C non-aligned large H cases.
+3. Zero-padding tile should use memcpy to avoid unsupported all-zero pad on hardware.
+
+JIRA: #COMPILER-825
+TEST: pass in local
+Change-Id: I15eb95b6d4bae751d4e580ea5c1117d1409fb85f
+Signed-off-by: eloisezhang <eloisezhang@ai-imvision.cn>
+Reviewed-on: https://gerrit.imv.local/c/aic_v3/+/75719
+Reviewed-by: Alan Chen <alanchen@ai-imvision.cn>
+Reviewed-by: Ray Yuan <rayyuan@ai-imvision.cn>
+Reviewed-by: Yiga Liu <yigaliu@ai-imvision.cn>
+Reviewed-by: imv-ci <imv.ci@imvision.cn>
+Tested-by: imv-ci <imv.ci@imvision.cn>
+---
+
+diff --git a/target/tensor_brain/include/tensor_brain/kernels/pad_kernel.h b/target/tensor_brain/include/tensor_brain/kernels/pad_kernel.h
+index 3f78a09..11e8997 100644
+--- a/target/tensor_brain/include/tensor_brain/kernels/pad_kernel.h
++++ b/target/tensor_brain/include/tensor_brain/kernels/pad_kernel.h
+@@ -35,15 +35,34 @@
+   Status BuildHwGraphImpl(const NodeIoArgs &args) override;
+   Status GenerateOutChannelTilingHwLayers(const NodeIoArgs &args);
+   Status GenerateHTilingHwLayers(const NodeIoArgs &args);
+-  Status BuildDummyConcatLayers1(std::vector<Tensor *> in_tensors,
+-                                 Tensor *out_tensor,
+-                                 const std::vector<HwLayer *> &free_nodes,
+-                                 ConcatAttr::Mode mode);
++  Status GenerateOutChannelHeightTilingHwLayers(
++      const NodeIoArgs &args, const std::vector<uint32_t> &c_parts);
++  Status BuildDummyConcatLayers(std::vector<Tensor *> in_tensors,
++                                Tensor *out_tensor,
++                                const std::vector<HwLayer *> &free_nodes,
++                                ConcatAttr::Mode mode);
+ 
+   PadAttr &attr_ref() { return attr_; }
+   Status CheckParamsValidity();
+ 
+  private:
++  enum class PadTileMode {
++    kNone,
++    kOutChannelTile,
++    kOutChannelHeightTile,
++    kHeightTile,
++  };
++
++  struct PadTileInfo {
++    PadTileMode mode = PadTileMode::kNone;
++    uint32_t mem_size = 0;
++    bool single_pad = false;
++    std::vector<uint32_t> c_parts;
++  };
++
++  PadTileInfo TileAndSelect(const NodeIoArgs &args);
++  bool IsSingleDmaPad();
++
+   PadAttr attr_;
+   static constexpr uint32_t PAD_MAX_LIMIT = 16;
+   static constexpr uint32_t PAD_MIN_LIMIT = 0;
+diff --git a/target/tensor_brain/kernels/kernel.cpp b/target/tensor_brain/kernels/kernel.cpp
+index 73249dc..eb84ef5 100644
+--- a/target/tensor_brain/kernels/kernel.cpp
++++ b/target/tensor_brain/kernels/kernel.cpp
+@@ -702,6 +702,9 @@
+       }
+       if (in_tensor->pattern() == Pattern::kNHWC || in_tensor->pattern() == Pattern::kNHWC_SPARSE) {
+         uint32_t offset = start_channel * GetBitWidth(in_tensor->data_type());
++        if (dummy_slice_layer->GetExtraEn()) {
++          offset += dummy_slice_layer->GetExtraVal();
++        }
+         out_tensor->SetMemOffset(offset);
+       } else {
+         /* build tensor to caculate the offset. */
+@@ -711,7 +714,11 @@
+         offset_tensor->Init({1, start_channel, in_tensor->H(), in_tensor->W()},
+                             in_tensor->data_type(),
+                             in_tensor->pattern());
+-        out_tensor->SetMemOffset(offset_tensor->GetMallocSize());
++        uint32_t offset = offset_tensor->GetMallocSize();
++        if (dummy_slice_layer->GetExtraEn()) {
++          offset += dummy_slice_layer->GetExtraVal();
++        }
++        out_tensor->SetMemOffset(offset);
+       }
+       TLOG_D("Infer dummy slice layer %s's output tensor %s offset is 0x%X.\n",
+       dummy_slice_layer->name().c_str(), out_tensor->name().c_str(), out_tensor->GetMemOffset());
+@@ -847,8 +854,11 @@
+         }
+       }
+       if (in_tensor->pattern() == Pattern::kNHWC || in_tensor->pattern() == Pattern::kNHWC_SPARSE) {
+-        out_tensor->SetAddr(in_tensor->addr() +
+-          start_channel * GetBitWidth(in_tensor->data_type()));
++        uint32_t offset = start_channel * GetBitWidth(in_tensor->data_type());
++        if (dummy_slice_layer->GetExtraEn()) {
++          offset += dummy_slice_layer->GetExtraVal();
++        }
++        out_tensor->SetAddr(in_tensor->addr() + offset);
+       } else {
+         /* build tensor to caculate the offset. */
+         std::string offset_tensor_name =  + "offset_" + std::to_string(index++);
+@@ -857,7 +867,11 @@
+         offset_tensor->Init({1, start_channel, in_tensor->H(), in_tensor->W()},
+                             in_tensor->data_type(),
+                             in_tensor->pattern());
+-        out_tensor->SetAddr(in_tensor->addr() + offset_tensor->GetMallocSize());
++        uint32_t offset = offset_tensor->GetMallocSize();
++        if (dummy_slice_layer->GetExtraEn()) {
++          offset += dummy_slice_layer->GetExtraVal();
++        }
++        out_tensor->SetAddr(in_tensor->addr() + offset);
+       }
+       TLOG_D("Infer dummy slice layer %s's output tensor %s addr is 0x%X.\n",
+              dummy_slice_layer->name().c_str(), out_tensor->name().c_str(), out_tensor->addr());
+diff --git a/target/tensor_brain/kernels/pad.cpp b/target/tensor_brain/kernels/pad.cpp
+index a6e3edf..0a23567 100644
+--- a/target/tensor_brain/kernels/pad.cpp
++++ b/target/tensor_brain/kernels/pad.cpp
+@@ -26,6 +26,7 @@
+ #include "aic/utils/common.h"
+ #include "tensor_brain/hw_layers/dummy/dummy_concat_layer.h"
+ #include "tensor_brain/hw_layers/dummy/dummy_slice_layer.h"
++#include "tensor_brain/hw_layers/mte/memcopy_layer.h"
+ #include "tensor_brain/hw_layers/mte/pad_layer.h"
+ #include "tensor_brain/kernel.h"
+ #include "tensor_brain/kernels/mte_kernel.h"
+@@ -36,37 +37,106 @@
+ 
+ namespace aic {
+ 
++namespace {
++
++constexpr uint32_t kPadCTilingMemLimit = 2 * SZ_1M;
++constexpr uint32_t kPadHTilingMemLimit = 4 * SZ_1M;
++
++std::vector<uint32_t> CalcHParts(uint32_t total_h, uint32_t split_num) {
++  std::vector<uint32_t> h_parts(split_num, total_h / split_num);
++  uint32_t remain = total_h % split_num;
++  for (uint32_t i = 0; i < remain; ++i) {
++    h_parts[i] += 1;
++  }
++  return h_parts;
++}
++
++uint32_t CalcChannelTilePart(uint32_t total_c, uint32_t mem_size) {
++  uint32_t split_num = mem_size / kPadCTilingMemLimit;
++  if (mem_size % kPadCTilingMemLimit != 0) {
++    split_num += 1;
++  }
++  uint32_t c_part = (total_c / split_num) & ~0x7;
++  if (c_part == 0) {
++    c_part = C8;
++  }
++  return c_part;
++}
++
++std::vector<uint32_t> CalcChannelTileParts(uint32_t total_c,
++                                           uint32_t mem_size) {
++  std::vector<uint32_t> c_parts;
++  uint32_t c_part = CalcChannelTilePart(total_c, mem_size);
++  for (uint32_t begin_c = 0; begin_c < total_c; begin_c += c_part) {
++    c_parts.push_back(std::min(c_part, total_c - begin_c));
++  }
++  return c_parts;
++}
++
++uint32_t CalcPadTileMallocSize(const Tensor *in_tensor,
++                               const Tensor *out_tensor, uint32_t c,
++                               uint32_t in_h, uint32_t out_h) {
++  Tensor tile_in(in_tensor->name() + "_pad_tiling_probe_in");
++  Tensor tile_out(out_tensor->name() + "_pad_tiling_probe_out");
++  tile_in.Init({1, c, in_h, in_tensor->W()}, in_tensor->data_type(),
++               in_tensor->pattern(), in_tensor->acc());
++  tile_out.Init({1, c, out_h, out_tensor->W()}, out_tensor->data_type(),
++                out_tensor->pattern(), out_tensor->acc());
++  return tile_in.GetMallocSize() + tile_out.GetMallocSize();
++}
++
++uint32_t CalcMaxPadTileMallocSize(const Tensor *in_tensor,
++                                  const Tensor *out_tensor,
++                                  const std::vector<uint32_t> &c_parts) {
++  uint32_t max_size = 0;
++  for (uint32_t c_part : c_parts) {
++    max_size = std::max(
++        max_size, CalcPadTileMallocSize(in_tensor, out_tensor, c_part,
++                                        in_tensor->H(), out_tensor->H()));
++  }
++  return max_size;
++}
++
++bool IsZeroPadding(const PadAttr &attr) {
++  return attr.pad_size_h_up == 0 && attr.pad_size_h_down == 0 &&
++         attr.pad_size_w_left == 0 && attr.pad_size_w_right == 0;
++}
++
++uint32_t CalcHeightExtraOffset(const Tensor *in_tensor, uint32_t c,
++                               uint32_t start_h) {
++  if (start_h == 0) {
++    return 0;
++  }
++
++  Tensor offset_tensor(in_tensor->name() + "_pad_h_offset_probe");
++  offset_tensor.Init({1, c, start_h, in_tensor->W()},
++                     in_tensor->data_type(), in_tensor->pattern(),
++                     in_tensor->acc());
++  if (in_tensor->pattern() == Pattern::kNCHW ||
++      in_tensor->pattern() == Pattern::kNCHW_TIGHT) {
++    return offset_tensor.GetPatchSize();
++  }
++  return offset_tensor.GetMallocSize();
++}
++
++} /* namespace */
++
+ Status PadKernel::BuildHwGraphImpl(const NodeIoArgs &args) {
+-  Tensor *in_tensor = Cast<Tensor>(args[0][0]);
+-  Tensor *out_tensor = Cast<Tensor>(args[1][0]);
+   Status status = CheckParamsValidity();
+   if (status != Status::OK()) {
+     return status;
+   }
+-  uint32_t mem_size = out_tensor->GetMallocSize() + in_tensor->GetMallocSize();
+-  auto single_pad = [&] () {
+-    for (auto iter = this->InputNodesBegin(); iter != this->InputNodesEnd(); ++iter) {
+-      auto dma_in = CastNoCheck<DmaInKernel>(&*iter);
+-      if (dma_in == nullptr) {
+-        return false;
+-      }
+-    }
+-    for (auto iter = this->OutputNodesBegin(); iter != this->OutputNodesEnd(); ++iter) {
+-      auto dma_out = CastNoCheck<DmaOutKernel>(&*iter);
+-      if (dma_out == nullptr) {
+-        return false;
+-      }
+-    }
+-    return true;
+-  };
+ 
+-  if (mem_size > 2 * SZ_1M && single_pad() && in_tensor->C() >= 8) {
+-    AIC_RETURN_IF_ERROR(GenerateOutChannelTilingHwLayers(args));
+-    return Status::OK();
+-  }
+-
+-  if (mem_size > 2 * SZ_1M && single_pad()) {
+-    return GenerateHTilingHwLayers(args);
++  PadTileInfo tile_info = TileAndSelect(args);
++  switch (tile_info.mode) {
++    case PadTileMode::kOutChannelHeightTile:
++      return GenerateOutChannelHeightTilingHwLayers(args, tile_info.c_parts);
++    case PadTileMode::kOutChannelTile:
++      return GenerateOutChannelTilingHwLayers(args);
++    case PadTileMode::kHeightTile:
++      return GenerateHTilingHwLayers(args);
++    case PadTileMode::kNone:
++      break;
+   }
+ 
+   PadLayer &layer = hw_graph_->AddHwLayer<PadLayer>(name());
+@@ -78,6 +148,60 @@
+   return Status::OK();
+ }
+ 
++bool PadKernel::IsSingleDmaPad() {
++  for (auto iter = this->InputNodesBegin(); iter != this->InputNodesEnd();
++       ++iter) {
++    auto dma_in = CastNoCheck<DmaInKernel>(&*iter);
++    if (dma_in == nullptr) {
++      return false;
++    }
++  }
++  for (auto iter = this->OutputNodesBegin(); iter != this->OutputNodesEnd();
++       ++iter) {
++    auto dma_out = CastNoCheck<DmaOutKernel>(&*iter);
++    if (dma_out == nullptr) {
++      return false;
++    }
++  }
++  return true;
++}
++
++PadKernel::PadTileInfo PadKernel::TileAndSelect(const NodeIoArgs &args) {
++  Tensor *in_tensor = Cast<Tensor>(args[0][0]);
++  Tensor *out_tensor = Cast<Tensor>(args[1][0]);
++  PadTileInfo tile_info;
++  tile_info.mem_size = out_tensor->GetMallocSize() + in_tensor->GetMallocSize();
++  tile_info.single_pad = IsSingleDmaPad();
++
++  if (tile_info.mem_size > kPadCTilingMemLimit && tile_info.single_pad) {
++    tile_info.c_parts = CalcChannelTileParts(in_tensor->C(), tile_info.mem_size);
++    if (tile_info.c_parts.size() > 1) {
++      if (attr_.pad_mode == PadAttr::PadMode::kConstantPadding &&
++          in_tensor->pattern() == Pattern::kNpuFmt &&
++          CalcMaxPadTileMallocSize(in_tensor, out_tensor, tile_info.c_parts) >
++              kPadHTilingMemLimit &&
++          in_tensor->H() > 1) {
++        tile_info.mode = PadTileMode::kOutChannelHeightTile;
++        return tile_info;
++      }
++      tile_info.mode = PadTileMode::kOutChannelTile;
++      return tile_info;
++    }
++
++    if (attr_.pad_mode == PadAttr::PadMode::kConstantPadding &&
++        in_tensor->pattern() == Pattern::kNpuFmt && in_tensor->H() > 1) {
++      tile_info.mode = PadTileMode::kOutChannelHeightTile;
++      return tile_info;
++    }
++
++    tile_info.mode = PadTileMode::kHeightTile;
++    return tile_info;
++  }
++
++  tile_info.mode = PadTileMode::kNone;
++  return tile_info;
++}
++
+ Status PadKernel::CheckParamsValidity() {
+   if ((attr_.pad_size_h_down > PAD_MAX_LIMIT) ||
+        (attr_.pad_size_h_up > PAD_MAX_LIMIT) ||
+@@ -114,7 +238,7 @@
+   uint32_t c_part = (total_out_chl / tmp_num) & ~0x7;
+   if (c_part == 0) c_part = 8;
+ 
+-  if (c_part == 0) {
++  if (c_part == 0 || c_part >= total_out_chl) {
+     TLOG_E("pad[%s] c is too small to tile!\n" , this->name().c_str());
+     return Status(StatusCategory::AIC, StatusCode::FAIL);
+   }
+@@ -159,8 +283,8 @@
+   }
+ 
+   auto status =
+-      BuildDummyConcatLayers1(split_act_out_tensors, out_tensor,
+-                              delay_mem_free_nodes, ConcatAttr::Mode::kChannel);
++      BuildDummyConcatLayers(split_act_out_tensors, out_tensor,
++                             delay_mem_free_nodes, ConcatAttr::Mode::kChannel);
+   if (!status.IsOK()) {
+     TLOG_E("failed to build dummy concat layers.\n");
+     return Status(StatusCategory::AIC, StatusCode::FAIL);
+@@ -263,12 +387,196 @@
+     slice_start_dim += slice_size;
+   }
+ 
+-  return BuildDummyConcatLayers(split_outs, out, delay_mem_free_nodes, "height", name());
++  return Kernel::BuildDummyConcatLayers(split_outs, out, delay_mem_free_nodes,
++                                        "height", name());
+ }
+ 
+-Status PadKernel::BuildDummyConcatLayers1(
++Status PadKernel::GenerateOutChannelHeightTilingHwLayers(
++    const NodeIoArgs &args, const std::vector<uint32_t> &c_parts) {
++  Tensor *in_tensor = Cast<Tensor>(args[0][0]);
++  Tensor *out_tensor = Cast<Tensor>(args[1][0]);
++  uint32_t mem_size = out_tensor->GetMallocSize() + in_tensor->GetMallocSize();
++  uint32_t total_in_h = in_tensor->H();
++  if (total_in_h < 2) {
++    TLOG_E("pad[%s] h is too small to tile!\n", this->name().c_str());
++    return Status(StatusCategory::AIC, StatusCode::FAIL);
++  }
++
++  if (c_parts.empty()) {
++    TLOG_E("pad[%s] c is too small to tile!\n", this->name().c_str());
++    return Status(StatusCategory::AIC, StatusCode::FAIL);
++  }
++
++  uint32_t split_num =
++      (mem_size + kPadHTilingMemLimit - 1U) / kPadHTilingMemLimit;
++  split_num = std::max(2U, split_num);
++  split_num = std::min(split_num, total_in_h);
++
++  std::vector<uint32_t> h_parts;
++  for (; split_num <= total_in_h; ++split_num) {
++    h_parts = CalcHParts(total_in_h, split_num);
++    bool split_valid = true;
++    for (uint32_t i = 0; i < h_parts.size(); ++i) {
++      PadAttr tile_attr = attr_;
++      if (i != 0) {
++        tile_attr.pad_size_h_up = 0;
++      }
++      if (i != h_parts.size() - 1) {
++        tile_attr.pad_size_h_down = 0;
++      }
++      uint32_t tile_out_h = h_parts[i] + tile_attr.pad_size_h_up +
++                            tile_attr.pad_size_h_down;
++      for (uint32_t c_part : c_parts) {
++        if (CalcPadTileMallocSize(in_tensor, out_tensor, c_part, h_parts[i],
++                                  tile_out_h) > kPadHTilingMemLimit) {
++          split_valid = false;
++          break;
++        }
++      }
++      if (!split_valid) {
++        break;
++      }
++    }
++    if (split_valid) {
++      break;
++    }
++  }
++
++  if (h_parts.empty() || split_num > total_in_h) {
++    TLOG_E("pad[%s] cannot find valid c+h tiling split.\n",
++           this->name().c_str());
++    return Status(StatusCategory::AIC, StatusCode::FAIL);
++  }
++
++  SetTilingPair({static_cast<uint32_t>(h_parts.size()),
++                 static_cast<uint32_t>(c_parts.size())});
++  if (c_parts.size() > 1) {
++    EnableOCHtiling();
++  }
++
++  std::vector<Tensor *> c_split_out_tensors;
++  std::vector<HwLayer *> c_delay_nodes;
++
++  uint32_t begin_c = 0;
++  for (uint32_t c_idx = 0; c_idx < c_parts.size(); ++c_idx) {
++    uint32_t c_part = c_parts[c_idx];
++    std::vector<Tensor *> h_split_out_tensors;
++    std::vector<HwLayer *> h_delay_nodes;
++
++    uint32_t begin_h = 0;
++    for (uint32_t h_idx = 0; h_idx < h_parts.size(); ++h_idx) {
++      uint32_t h_part = h_parts[h_idx];
++      DummySliceLayer &slice_layer = hw_graph_->AddHwLayer<DummySliceLayer>(
++          name() + ".slice.input.c." + std::to_string(c_idx) + ".h." +
++          std::to_string(h_idx));
++      SliceAttr slice_attr({SliceAttr::Mode::kChannel});
++      slice_attr.start_index = begin_c;
++      slice_attr.output_size = c_part;
++      uint32_t extra_off = CalcHeightExtraOffset(in_tensor, c_part, begin_h);
++      if (extra_off != 0) {
++        slice_attr.extra_off_en = true;
++        slice_attr.extra_off = extra_off;
++      }
++      slice_layer.Init(slice_attr);
++
++      Tensor &slice_out = hw_graph_->GetOrCreateTensor(
++          in_tensor->name() + "_splitc_" + std::to_string(c_idx) +
++          "_splith_in_" + std::to_string(h_idx));
++      slice_out.Init({1, c_part, h_part, in_tensor->W()},
++                     in_tensor->data_type(), in_tensor->pattern(),
++                     in_tensor->acc());
++      slice_layer.SetInputs({in_tensor}).SetOutputs({&slice_out});
++
++      PadAttr split_pad_attr = attr_;
++      if (h_idx != 0) {
++        split_pad_attr.pad_size_h_up = 0;
++      }
++      if (h_idx != h_parts.size() - 1) {
++        split_pad_attr.pad_size_h_down = 0;
++      }
++      uint32_t out_h = h_part + split_pad_attr.pad_size_h_up +
++                       split_pad_attr.pad_size_h_down;
++
++      Tensor &split_pad_out = hw_graph_->GetOrCreateTensor(
++          out_tensor->name() + ".pad.split.out.c." + std::to_string(c_idx) +
++          ".h." + std::to_string(h_idx));
++      split_pad_out.Init({1, c_part, out_h, out_tensor->W()},
++                         out_tensor->data_type(), out_tensor->pattern(),
++                         out_tensor->acc());
++      if (IsZeroPadding(split_pad_attr)) {
++        MemCopyLayer &split_copy_layer = hw_graph_->AddHwLayer<MemCopyLayer>(
++            name() + ".copy.c." + std::to_string(c_idx) + ".h." +
++            std::to_string(h_idx));
++        MemCopyAttr copy_attr{.copy_size = slice_out.GetMallocSize()};
++        split_copy_layer.Init(copy_attr);
++        split_copy_layer.SetReluLabel(GetReluLabel());
++        split_copy_layer.SetInputs({&slice_out}).SetOutputs({&split_pad_out});
++        h_delay_nodes.push_back(&split_copy_layer);
++      } else {
++        PadLayer &split_pad_layer = hw_graph_->AddHwLayer<PadLayer>(
++            name() + ".c." + std::to_string(c_idx) + ".h." +
++            std::to_string(h_idx));
++        split_pad_layer.Init(split_pad_attr);
++        split_pad_layer.hsplit_en = true;
++        split_pad_layer.SetReluLabel(GetReluLabel());
++        split_pad_layer.SetInputs({&slice_out}).SetOutputs({&split_pad_out});
++        h_delay_nodes.push_back(&split_pad_layer);
++      }
++      h_split_out_tensors.push_back(&split_pad_out);
++      begin_h += h_part;
++    }
++
++    Tensor *c_split_out = out_tensor;
++    if (c_parts.size() > 1) {
++      c_split_out = &hw_graph_->GetOrCreateTensor(
++          out_tensor->name() + ".pad.split.out.c." + std::to_string(c_idx));
++      c_split_out->Init({1, c_part, out_tensor->H(), out_tensor->W()},
++                        out_tensor->data_type(), out_tensor->pattern(),
++                        out_tensor->acc());
++    }
++    auto h_status = Kernel::BuildDummyConcatLayers(
++        h_split_out_tensors, c_split_out, h_delay_nodes, "height",
++        name() + ".c." + std::to_string(c_idx));
++    if (!h_status.IsOK()) {
++      TLOG_E("failed to build h dummy concat layers.\n");
++      return Status(StatusCategory::AIC, StatusCode::FAIL);
++    }
++
++    c_split_out_tensors.push_back(c_split_out);
++    c_delay_nodes.push_back(nullptr);
++    begin_c += c_part;
++  }
++
++  if (c_split_out_tensors.size() == 1 && c_split_out_tensors[0] == out_tensor) {
++    return Status::OK();
++  }
++
++  auto c_status = Kernel::BuildDummyConcatLayers(
++      c_split_out_tensors, out_tensor, c_delay_nodes, "channel", name() + ".ch");
++  if (!c_status.IsOK()) {
++    TLOG_E("failed to build c dummy concat layers.\n");
++    return Status(StatusCategory::AIC, StatusCode::FAIL);
++  }
++
++  return Status::OK();
++}
++
++Status PadKernel::BuildDummyConcatLayers(
+     std::vector<Tensor *> in_tensors, Tensor *out_tensor,
+     const std::vector<HwLayer *> &free_nodes, ConcatAttr::Mode mode) {
++  if (in_tensors.size() == 1) {
++    if (in_tensors[0] == out_tensor) {
++      return Status::OK();
++    }
++    if (!free_nodes.empty() && free_nodes[0] != nullptr) {
++      free_nodes[0]->SetOutputs({out_tensor});
++      return Status::OK();
++    }
++    TLOG_E("failed to bind single pad concat output for tensor <%s>.\n",
++           out_tensor->name().c_str());
++    return Status(StatusCategory::AIC, StatusCode::FAIL);
++  }
++
+   uint32_t total_index = 0;
+   while (in_tensors.size() > 1) {
+     uint32_t input_tensor_nums = in_tensors.size();
+diff --git a/target/tensor_brain/transforms/build_analyse_graph_pass.cpp b/target/tensor_brain/transforms/build_analyse_graph_pass.cpp
+index bfa9f68..4c870db 100644
+--- a/target/tensor_brain/transforms/build_analyse_graph_pass.cpp
++++ b/target/tensor_brain/transforms/build_analyse_graph_pass.cpp
+@@ -1864,8 +1864,13 @@
+     auto node_index = viewer.GetNodesInTopologicalOrder();
+     std::unordered_set<uint32_t> slice_piece;
+     std::vector<uint32_t> slices;
+-    std::vector<uint32_t> slice_start_idx;
++    std::vector<SliceAttr> ordered_slice_attrs;
+     std::unordered_set<SliceAttr::Mode> slice_mode_set;
++    auto isFusedSliceOrder = [](const SliceAttr &prev,
++                                const SliceAttr &cur) -> bool {
++      return prev.mode == cur.mode && prev.start_index == cur.start_index &&
++             (prev.extra_off_en || cur.extra_off_en);
++    };
+     for (auto index : node_index) {
+       auto &&hwLayer = dst_hw_graph.GetNode(index);
+       if (Isa<DummySliceLayer>(hwLayer)) {
+@@ -1874,15 +1879,17 @@
+           slice_piece.insert(sliceAttr.output_size);
+           slices.push_back(sliceAttr.output_size);
+           slice_mode_set.insert(sliceAttr.mode);
+-          if (slice_start_idx.empty()) {
+-            slice_start_idx.push_back(sliceAttr.start_index);
++          if (ordered_slice_attrs.empty()) {
++            ordered_slice_attrs.push_back(sliceAttr);
+           } else {
+-            if (*(slice_start_idx.end() - 1) >= sliceAttr.start_index
++            if (ordered_slice_attrs.back().start_index >=
++                    sliceAttr.start_index
+              && !sink_kernel->GetOCHtiling()
++             && !isFusedSliceOrder(ordered_slice_attrs.back(), sliceAttr)
+              && !Isa<BatchNormKernel>(sink_kernel)) {
+               return false;
+             } else {
+-              slice_start_idx.push_back(sliceAttr.start_index);
++              ordered_slice_attrs.push_back(sliceAttr);
+             }
+           }
+         }
+@@ -1960,27 +1967,34 @@
+   auto &&src_hw_graph = source_kernel->HwGraphRef();
+   auto &&dst_hw_graph = sink_kernel->HwGraphRef();
+ 
++  struct DummySliceInfo {
++    SliceAttr attr;
++    Tensor::Dimensions output_dims;
++  };
++
+   /* collect dummyslice infos */
+   auto collectDummySliceInfos =
+-      [&dst_hw_graph](const std::string &input_name) -> std::vector<SliceAttr> {
++      [&dst_hw_graph](const std::string &input_name)
++          -> std::vector<DummySliceInfo> {
+     GraphViewer viewer(dst_hw_graph);
+     auto node_index = viewer.GetNodesInTopologicalOrder();
+-    std::vector<SliceAttr> slice_attrs;
++    std::vector<DummySliceInfo> slice_infos;
+     for (auto index : node_index) {
+       auto &&hwLayer = dst_hw_graph.GetNode(index);
+       if (Isa<DummySliceLayer>(hwLayer)) {
+         if (hwLayer->MutableInputs()[0]->name() == input_name) {
+           auto &&sliceAttr = CastNoCheck<DummySliceLayer>(hwLayer)->Attr();
+-          slice_attrs.push_back(sliceAttr);
++          Tensor *slice_out = Cast<Tensor>(hwLayer->MutableOutputs()[0]);
++          slice_infos.push_back({sliceAttr, slice_out->dim()});
+         }
+       }
+     }
+-    return slice_attrs;
++    return slice_infos;
+   };
+-  std::vector<SliceAttr> slice_attrs =
++  std::vector<DummySliceInfo> slice_infos =
+       collectDummySliceInfos(source_kernel->MutableOutputs()[0]->name());
+ 
+-  if (slice_attrs.size() == 0) {
++  if (slice_infos.size() == 0) {
+     return Status(StatusCategory::AIC, StatusCode::PATTERN_REWRITE_FAIL,
+                   "valid dummyslice is empty");
+   }
+@@ -1996,8 +2010,9 @@
+    * build input->dummyslice->dmain
+    */
+   auto concat_dim = ConcatAttr::Mode::kChannel;
+-  for (size_t i = 0; i != slice_attrs.size(); ++i) {
+-    auto attr = slice_attrs[i];
++  bool has_fused_channel_slice = false;
++  for (size_t i = 0; i != slice_infos.size(); ++i) {
++    auto attr = slice_infos[i].attr;
+     DummySliceLayer &dummy_slice_layer =
+         src_hw_graph.AddHwLayer<DummySliceLayer>(
+             ori_dmain->name() + ".slice.input." + std::to_string(i));
+@@ -2007,21 +2022,20 @@
+      */
+     Tensor &slice_out = src_hw_graph.GetOrCreateTensor(
+         input->name() + "_split_in_" + std::to_string(i));
+-    Tensor::Dimensions slice_out_dim = input->dim();
+     switch (attr.mode) {
+       case SliceAttr::Mode::kChannel: {
+-        slice_out_dim[1] = attr.output_size;
+         concat_dim = ConcatAttr::Mode::kChannel;
++        if (attr.extra_off_en || slice_infos[i].output_dims[2] != input->H()) {
++          has_fused_channel_slice = true;
++        }
+         break;
+       }
+       case SliceAttr::Mode::kHeight: {
+-        slice_out_dim[2] = attr.output_size;
+         concat_dim = ConcatAttr::Mode::kHeight;
+         break;
+       }
+       case SliceAttr::Mode::kWidth: {
+         concat_dim = ConcatAttr::Mode::kWidth;
+-        slice_out_dim[3] = attr.output_size;
+         break;
+       }
+       default: {
+@@ -2030,7 +2044,8 @@
+       }
+     }
+ 
+-    slice_out.Init(slice_out_dim, input->data_type(), input->pattern());
++    slice_out.Init(slice_infos[i].output_dims, input->data_type(),
++                   input->pattern());
+     slice_out.SetMemSpace(MemSpace::kDDR);
+     dummy_slice_layer.SetInputs({input}).SetOutputs({&slice_out});
+     auto &&dmainLayer = src_hw_graph.AddHwLayer<NpuDmaIn>(
+@@ -2051,7 +2066,14 @@
+       dmainLayer.SetSrcLineStride(slice_out.GetLineStride());
+     }
+     if (attr.mode == SliceAttr::Mode::kChannel) {
+-      dmainLayer.SetSrcPatchStride(slice_out.GetPatchSize());
++      if (attr.extra_off_en || slice_out.H() != input->H()) {
++        Tensor full_h_slice(input->name() + "_split_full_h_stride");
++        full_h_slice.Init({1, attr.output_size, input->H(), input->W()},
++                          input->data_type(), input->pattern());
++        dmainLayer.SetSrcPatchStride(full_h_slice.GetPatchSize());
++      } else {
++        dmainLayer.SetSrcPatchStride(slice_out.GetPatchSize());
++      }
+     } else { /*for slice h and slice w*/
+       dmainLayer.SetSrcPatchStride(input->GetPatchSize());
+     }
+@@ -2069,8 +2091,58 @@
+       input->data_type(), input->pattern());
+   dummyconcat_out.SetMemSpace(MemSpace::kL1);
+ 
+-  AIC_RETURN_IF_ERROR(dma_kernel->BuildDummyConcatLayers(
+-      dummyconcats_input, &dummyconcat_out, free_nodes, concat_dim));
++  if (has_fused_channel_slice) {
++    std::vector<Tensor *> channel_concat_inputs;
++    std::vector<HwLayer *> empty_free_nodes;
++    size_t group_begin = 0;
++    uint32_t group_idx = 0;
++    while (group_begin < slice_infos.size()) {
++      size_t group_end = group_begin + 1;
++      while (group_end < slice_infos.size() &&
++             slice_infos[group_end].attr.mode == SliceAttr::Mode::kChannel &&
++             slice_infos[group_end].attr.start_index ==
++                 slice_infos[group_begin].attr.start_index &&
++             slice_infos[group_end].attr.output_size ==
++                 slice_infos[group_begin].attr.output_size) {
++        ++group_end;
++      }
++
++      std::vector<Tensor *> height_concat_inputs(
++          dummyconcats_input.begin() + group_begin,
++          dummyconcats_input.begin() + group_end);
++      Tensor *height_concat_out = &dummyconcat_out;
++      bool is_single_channel_group =
++          group_begin == 0 && group_end == slice_infos.size();
++      if (!is_single_channel_group) {
++        height_concat_out = &src_hw_graph.GetOrCreateTensor(
++            ori_dmain->name() + ".dummyconcat.group." +
++            std::to_string(group_idx));
++        height_concat_out->Init(
++            {1, height_concat_inputs[0]->C(), input->H(), input->W()},
++            input->data_type(), input->pattern());
++        height_concat_out->SetMemSpace(MemSpace::kL1);
++      }
++
++      const std::vector<HwLayer *> &height_free_nodes =
++          is_single_channel_group ? free_nodes : empty_free_nodes;
++      AIC_RETURN_IF_ERROR(dma_kernel->Kernel::BuildDummyConcatLayers(
++          height_concat_inputs, height_concat_out, height_free_nodes,
++          "height", ori_dmain->name() + ".group." +
++                        std::to_string(group_idx)));
++      channel_concat_inputs.push_back(height_concat_out);
++      group_begin = group_end;
++      ++group_idx;
++    }
++
++    if (channel_concat_inputs.size() > 1) {
++      AIC_RETURN_IF_ERROR(dma_kernel->Kernel::BuildDummyConcatLayers(
++          channel_concat_inputs, &dummyconcat_out, free_nodes, "channel",
++          ori_dmain->name() + ".ch"));
++    }
++  } else {
++    AIC_RETURN_IF_ERROR(dma_kernel->BuildDummyConcatLayers(
++        dummyconcats_input, &dummyconcat_out, free_nodes, concat_dim));
++  }
+ 
+   ori_dmain->SetInValid();
+   src_hw_graph.ReleaseNode(ori_dmain->Index());

@@ -130,6 +130,14 @@ Slice2和DummyConcat的output都不会有超过4m的内存落盘，而Reflection
 
 真正开始使用源码进行询问，尝试进行功能性修复，claude给出添加pass，切分让其输出不让buffer出现oom现象
 
+## alan给出一个方向
+Alan Chen 6/30 18:11:12
+看你描述这个问题是node tiling的问题
+
+Alan Chen 6/30 18:12:02
+![alt text](企业微信截图_17828143219559.png)
+### 什么是 BuildHwGraphImpl
+
 ## 3 Debug
 ### 3.1 编译debug模式
 `./build.sh --no-gtest -bt Debug --no-asan-leak`
