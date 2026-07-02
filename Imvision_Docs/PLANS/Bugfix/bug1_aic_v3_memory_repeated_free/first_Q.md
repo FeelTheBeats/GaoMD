@@ -138,10 +138,14 @@ Alan Chen 6/30 18:12:02
 ![alt text](企业微信截图_17828143219559.png)
 ### 什么是 BuildHwGraphImpl
 
-## 3 Debug
-### 3.1 编译debug模式
-`./build.sh --no-gtest -bt Debug --no-asan-leak`
+### 仿真
+本质上挂哪个子model跑哪个，但是最好全跑保证正确性
+- 编译全部，且用ais跑 （超伟哥提供脚本）
+python3 /home/sevengao/Script/model_test_v3.py --path /ho
+me/sevengao/bugs/001_memory_repeated_free/all_scales/tnt-5875/motionattgen_npu_a400_out &> loglog
 
-### 3.2 
+ok 过了，上板试试
 
-## 4. 知识总结
+- 上板ip
+\\10.198.24.11\public_share\user
+VNCIP：

@@ -132,6 +132,52 @@ pad.hsplit_en = true;
 
 改动：1 行。
 
+#### 5.4.1 为什么这一行能生效？
+
+**`hsplit_en` 的语义**：它是一个标志位，声明"这个 PadLayer 是 H 方向切分（tiling）产生的，各 tile 之间的输出尺寸差异是切分导致的预期行为，不代表出错"。
+
+**为什么需要这个标志？**
+
+`KernelMovDummyConcatAfterDMAOutPattern` 的匹配条件 `allSplitedPartEqual(Height)` 的本意是：确认所有 tile "等分"，即每个 tile 输出尺寸相同。这个检查对于 Conv2d、Eltwise 等算子没问题——它们的 tiling 天然等分（每个 tile 做同样的计算，不影响输出 shape）。
+
+但 Pad 不一样。ReflectionPad 沿 H 方向加 padding：
+- **首 tile**（上边界）：输出高度 = tile_h + pad_top（pad_bottom = 0）
+- **中间 tile**（内部）：输出高度 = tile_h（上下 padding 均为 0）
+- **尾 tile**（下边界）：输出高度 = tile_h + pad_bottom（pad_top = 0）
+
+三个区域的 PadLayer 输出高度不同 → `size_of_parts` 数组中不止一个元素 → `allSplitedPartEqual` 返回 false → pattern 匹配失败 → DummyConcat 留在 L1 → OOM。
+
+**跳过机制如何工作？**
+
+`allSplitedPartEqual` 内部（line 1121-1126）有一段专门为 PadLayer 设计的跳过逻辑：
+
+```cpp
+if (Isa<PadLayer>(hw_layer)) {
+    auto pad_hw = CastNoCheck<PadLayer>(hw_layer);
+    if (pad_hw->hsplit_en) {
+        continue;  // 跳过此 PadLayer，不参与 size_of_parts 收集
+    }
+}
+```
+
+设置了 `hsplit_en = true` 后，边界 tile 的 PadLayer 被 `continue` 跳过，不参与等分检查。这样 `size_of_parts` 中只收集到 DummySlice/DummyConcat 的尺寸（它们在 H tiling 中是等分的）→ `size_of_parts.size() == 1` → `allSplitedPartEqual` 返回 true → pattern 匹配成功。
+
+**逻辑全链路**：
+
+```
+pad.hsplit_en = true                          // 第 5.4 节，1 行修改
+    ↓
+allSplitedPartEqual 跳过 hsplit PadLayer       // 不等分检查绕过
+    ↓
+KernelMovDummyConcatAfterDMAOutPattern 匹配    // 框架已有 pattern
+    ↓
+Rewrite: NpuDmaOut 插入到每个 tile 之后         // DummyConcat 从 L1 移到 DDR
+    ↓
+L1 峰值 = 单个 tile（~540KB），而非全尺寸 8.36MB  // OOM 消除
+```
+
+**关键洞察**：这不是"加新功能"，而是"打通已有优化路径"。框架设计者在定义 `hsplit_en` 字段、在 `allSplitedPartEqual` 中写跳过逻辑、在 55f6e40 的新函数 `GenerateOutChannelHeightTilingHwLayers` 中设置这个标志时——每一步都说明他们预见到了这个场景。唯一缺失的是旧函数 `GenerateHTilingHwLayers` 中没有设这个标志。
+
 ### 5.5 修复后的流程
 
 ```
@@ -159,6 +205,9 @@ BuildAnalyseGraph（Pass 45）
 | iq_model62 | ❌ Malloc Error 8.36MB OOM | ✅ Done |
 
 ## 6. 经验总结
+
+### 6.0 最终解决原因路径xox
+ReflectionPad2d 大尺寸模型 OOM 的原因是：PadKernel 做 H tiling 后，框架在 L1 侧用 DummyConcat 把 15 个 tile 拼回全尺寸输出（8.36MB），超过了 4MB SRAM 上限。框架其实已经有一个 KernelMovDummyConcatAfterDMAOutPattern 能把拼接操作从 L1 搬到 DDR，让每个 tile 独立搬出后再拼，L1 只需一个 tile 的大小。但这个 pattern 要求所有 tile 等分，而 ReflectionPad 的首尾 tile 因为有 padding 高度不等（ReflectionPad 首/中/尾 tile 的 padding 区域不同，输出高度自然不同）(因为padding只影响原来的tensor，tiling后隶属于原tensor边界的区域大小和原tensor中间的区域大小不同)，被检查拦住了。框架预留了 hsplit_en 标志位专门跳过这种不等分检查，只是旧的 H tiling 函数没设置这个标志。加一行 pad.hsplit_en = true 就打通了整条优化链路，L1 峰值从 8.36MB 降到 540KB，两个模型全部通过。
 
 ### 6.1 逻辑链路
 
